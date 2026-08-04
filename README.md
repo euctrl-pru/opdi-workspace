@@ -1,4 +1,4 @@
-# OPDI_MASTER_NEW
+# OPDI_WORKSPACE
 
 Workspace for the **Open Performance Data Initiative** (OPDI) — EUROCONTROL Performance Review Unit.
 
@@ -9,8 +9,8 @@ This is a meta-repo: the working repos are git submodules pinned to specific com
 ## Setup
 
 ```bash
-git clone --recurse-submodules <url> OPDI_MASTER_NEW
-cd OPDI_MASTER_NEW
+git clone --recurse-submodules <url> OPDI_WORKSPACE
+cd OPDI_WORKSPACE
 make bootstrap
 ```
 

@@ -1,9 +1,9 @@
-# OPDI_MASTER_NEW
+# OPDI_WORKSPACE
 
 Meta-repo for the **Open Performance Data Initiative** (OPDI), EUROCONTROL PRU. Eight sub-repos as git submodules.
 
 ```bash
-git clone --recurse-submodules <url> OPDI_MASTER_NEW
+git clone --recurse-submodules <url> OPDI_WORKSPACE
 git submodule update --init --recursive   # if already cloned
 ```
 
