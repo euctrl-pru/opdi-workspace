@@ -29,7 +29,7 @@ make init
 | `eurocontrol/` | R package over PRISME. Ground truth — work laptop only. |
 | `traffic/` | Reference algorithms (read-only). |
 | `prc-data-challenges/` | 2024 and 2025 PRC Data Challenges: descriptions and winning solutions. |
-| `reference/` | Ground-truth extracts (git-lfs). |
+| `opdi/reference/` | Ground-truth extracts (git-lfs). Inside `opdi/`, so OSN gets them. |
 
 See [CLAUDE.md](CLAUDE.md) for the full working guide: pipeline layout, conventions, ground-truth mapping, and the evidence base from the PRC challenges.
 

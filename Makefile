@@ -1,4 +1,4 @@
-.PHONY: help bootstrap init status sync osn-clone test bench paper clean
+.PHONY: help bootstrap init lfs status sync osn-clone test bench paper clean
 .DEFAULT_GOAL := help
 
 # Repos that are actually written to (the rest are read-only reference)
@@ -8,9 +8,18 @@ help:  ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 		| awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 
-bootstrap: init  ## Full setup: submodules + git-lfs
-	@git lfs install --local >/dev/null 2>&1 || echo "warning: git-lfs not installed"
+bootstrap: init lfs  ## Full setup: submodules + git-lfs
 	@echo "Ready. See CLAUDE.md for the working guide."
+
+lfs:  ## Initialise git-lfs in opdi/ (where reference/*.parquet is tracked)
+	@git lfs version >/dev/null 2>&1 || { \
+		echo "ERROR: git-lfs is not installed."; \
+		echo "  opdi/reference/*.parquet is lfs-tracked. Without lfs, committing a"; \
+		echo "  parquet stores it as a normal blob and permanently bloats history."; \
+		echo "  Install it before touching reference/:  apt-get install git-lfs"; \
+		exit 1; }
+	@cd opdi && git lfs install --local && git lfs track
+	@echo "git-lfs initialised in opdi/"
 
 init:  ## Initialise/update submodules to their pinned commits
 	git submodule update --init --recursive
