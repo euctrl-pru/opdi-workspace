@@ -1,0 +1,32 @@
+[submodule "opdi"]
+	path = opdi
+	url = https://github.com/euctrl-pru/opdi
+	branch = main
+[submodule "opdi-portal"]
+	path = opdi-portal
+	url = https://github.com/euctrl-pru/opdi-portal
+	branch = feature/new-topics
+[submodule "eurocontrol"]
+	path = eurocontrol
+	url = https://github.com/eurocontrol/eurocontrol
+	branch = main
+[submodule "traffic"]
+	path = traffic
+	url = https://github.com/xoolive/traffic
+	branch = master
+[submodule "prc-data-challenges/2024/prc_data_challenge"]
+	path = prc-data-challenges/2024/prc_data_challenge
+	url = https://github.com/euctrl-pru/prc_data_challenge
+	branch = main
+[submodule "prc-data-challenges/2024/team_likable_jelly"]
+	path = prc-data-challenges/2024/team_likable_jelly
+	url = https://github.com/PRC-Data-Challenge-2024/team_likable_jelly
+	branch = main
+[submodule "prc-data-challenges/2025/prc_data_challenge_website_2025"]
+	path = prc-data-challenges/2025/prc_data_challenge_website_2025
+	url = https://github.com/euctrl-pru/prc_data_challenge_website_2025
+	branch = master
+[submodule "prc-data-challenges/2025/resourceful-quiver"]
+	path = prc-data-challenges/2025/resourceful-quiver
+	url = https://github.com/PRC-Data-Challenge-2025/resourceful-quiver
+	branch = main

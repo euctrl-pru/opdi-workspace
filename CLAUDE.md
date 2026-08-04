@@ -1,0 +1,105 @@
+# OPDI_MASTER_NEW
+
+Meta-repo for the **Open Performance Data Initiative** (OPDI), EUROCONTROL PRU. Eight sub-repos as git submodules.
+
+```bash
+git clone --recurse-submodules <url> OPDI_MASTER_NEW
+git submodule update --init --recursive   # if already cloned
+```
+
+## The repos
+
+| Path | Remote | Branch | Role |
+|---|---|---|---|
+| `opdi/` | `euctrl-pru/opdi` | `main` | **The deliverable.** PySpark pipeline, runs on the OpenSky (OSN) server. |
+| `opdi-portal/` | `euctrl-pru/opdi-portal` | `feature/new-topics` | Quarto website. Concepts, methodology, roadmap, papers. |
+| `eurocontrol/` | `eurocontrol/eurocontrol` | `main` | **R** package over the PRISME Oracle warehouse. Ground truth. |
+| `traffic/` | `xoolive/traffic` | `master` | Reference algorithms. Read-only — never edit. |
+| `prc-data-challenges/2024/prc_data_challenge` | `euctrl-pru/…` | `main` | 2024 ATOW challenge description. |
+| `prc-data-challenges/2024/team_likable_jelly` | `PRC-Data-Challenge-2024/…` | `main` | **2024 winner** (Alligier & Gianazza, ENAC). |
+| `prc-data-challenges/2025/prc_data_challenge_website_2025` | `euctrl-pru/…` | `master` | 2025 fuel-flow challenge description. |
+| `prc-data-challenges/2025/resourceful-quiver` | `PRC-Data-Challenge-2025/…` | `main` | **2025 winner** (TU Delft). |
+
+Only `opdi/`, `opdi-portal/` and this meta-repo are written to. The rest are reference material.
+
+## What OPDI does
+
+Ingests OSN ADS-B state vectors → splits them into tracks → derives a flight list (ADEP/ADES) → extracts **flight events** (milestones) and **measurements** → publishes parquet at `eurocontrol.int/performance/data/download/OPDI`.
+
+The data model (see `opdi-portal/content/concepts.qmd`):
+- **EVENT** — a milestone with a 4D fix (lon, lat, altitude, timestamp), a `type`, a `source`, an algorithm `version`, and free-form `info`. Things that are not instants (level segments, holdings) are modelled as an **event pair**.
+- **MEASUREMENT** — a metric attached to an event by `event_id`.
+
+Published event types (v0.0.2): `take-off`, `landing`, `top-of-climb`, `top-of-descent`, `level-start`, `level-end`, `first-/last-xing-fl{50,70,100,245}`, `entry-/exit-{runway,taxiway,apron,hangar,threshold,parking_position,deicing_pad}`, `first_seen`, `last_seen`.
+
+## Pipeline layout (`opdi/`)
+
+No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `python opdi.py`, or `run_pipeline()`:
+
+| Step | Module | Does |
+|---|---|---|
+| 00 | `reference/` | H3 airport zones, HexAero airport layouts, airspaces, OurAirports, aircraft DB |
+| 01 | `ingestion/osn_statevectors.py` | Ingest OSN state vectors |
+| 02 | `pipeline/tracks.py` | Track splitting, H3 indexing, altitude cleaning |
+| 03 | `pipeline/flights.py` | Flight list — ADEP/ADES detection |
+| 04 | `pipeline/events.py` | Event + measurement extraction |
+| 05–08 | `output/`, `monitoring/` | Parquet export, cleanup, stats |
+
+**Environments** (`src/opdi/config.py`): `dev` / `live` use Iceberg-on-Hive over Azure ADLS with Kerberos; `local` uses Spark-native Iceberg; **`opensky` uses neither Hive nor Iceberg** — plain parquet over S3A at `s3a://eurocontrol/opdi`, optionally on Kubernetes. `utils/storage.py` `StorageManager` is the switch (`use_s3 = not enable_iceberg`).
+
+### Conventions that matter
+
+- **Everything is native Spark** — column expressions and window functions partitioned by `track_id`. No `traffic`, no `applyInPandas`, no `pandas_udf` anywhere in the current codebase. Introducing one is a deliberate architectural step, not a default.
+- **Units in the OSN schema are SI**: altitudes in **metres**, velocity and `vert_rate` in **m/s**. Event code converts at point of use (`* 3.28084` → ft, `* 196.850394` → ft/min, `* 1.94384` → kt). Getting this wrong is the most likely source of a silent bug.
+- **Track splitting is frozen.** `tracks.py:_add_track_id` is marked `CRITICAL - DO NOT MODIFY` — changing it breaks `track_id` continuity with all published data.
+- **Never mutate a published `version` string.** New algorithms get a new `version`; existing event types keep theirs so released data stays reproducible.
+- Executors run `docker/Dockerfile` → `quintengs/opdi-spark`. Any new runtime dependency must be added there or executors will fail at import.
+
+## Ground truth (`eurocontrol/`)
+
+R only, and **only runnable on the work laptop** — it needs PRISME Oracle access via ROracle plus `<SCHEMA>_USR` / `_PWD` / `_DBNAME` env vars.
+
+Extract → `arrow::write_parquet()` → commit to `opdi/reference/` under **git-lfs** → pull on OSN. Never query the DB from the pipeline or from a paper render.
+
+**APDF is in long/movement form** — there is no literal AOBT/ATOT column. Discriminate on `SRC_PHASE`:
+
+| Milestone | Column | Filter |
+|---|---|---|
+| AOBT | `BLOCK_TIME_UTC` | `SRC_PHASE == 'DEP'` |
+| ATOT | `MVT_TIME_UTC` | `SRC_PHASE == 'DEP'` |
+| ALDT | `MVT_TIME_UTC` | `SRC_PHASE == 'ARR'` |
+| AIBT | `BLOCK_TIME_UTC` | `SRC_PHASE == 'ARR'` |
+
+Also: `AP_C_RWY` (runway), `AP_C_STND` (stand), `C40_/C100_CROSS_{TIME,LAT,LON,FL}` + `_BEARING` (ASMA rings).
+
+`flights_tidy()` gives flight-level truth: `ADEP`, `ADES`, `AOBT_3`, `FLT_TOW`, and `AIRCRAFT_ADDRESS` — which **is `icao24`**, the join key to ADS-B. Join on `AIRCRAFT_ADDRESS` + callsign + date.
+
+⚠️ `apdf_tidy()` covers **one month at a time** and filters on `SRC_DATE_FROM` as well as `MVT_TIME_UTC` — a wide window silently drops rows. Loop monthly.
+
+## Working practices
+
+- **Benchmark every new milestone** against `eurocontrol` ground truth. Reproducible, committed as parquet under `opdi/reference/`, documented in a Quarto paper under `opdi-portal/papers/`.
+- **Papers must render offline.** `quarto render` requires no credentials and no DB — every figure reads a committed cache. This is an existing portal guarantee; do not break it.
+- Respect documented **negative results** from the PRC challenges — see below.
+- When touching a submodule: commit inside it first, then commit the updated pointer in the meta-repo.
+
+## Evidence base: PRC challenge findings
+
+The two winning solutions are the best available evidence on ADS-B cleaning. Key results:
+
+**Worth porting** — dedup on `(track_id, timestamp)`; lat/lon range checks; **stale-broadcast removal** (ADS-B updates position and velocity in separate message types, so identical consecutive values mean *repeated*, not *measured*); **derivative spike filtering with a ≥2-vote kill rule** (a point dies only if it participates in ≥2 flagged derivative windows, which targets the middle of a spike while sparing legitimate step changes); isolated-point removal at 20 s; gap segmentation at 5 min.
+
+**Documented negative results — do not implement:**
+- Synthetic gap filling: *"Attempts to complete the trajectory always lead to worse result"* (2025 report §7).
+- GPS-jamming removal: leaving jamming untouched scored better (2025 report §7).
+- ERA5 wind enrichment: removing wind *improved* RMSE 201.04 → 199.91 (2025 Table 4).
+
+**Design note:** 2024 masks bad values to NULL and keeps the row; 2025 drops rows then resamples to 1 s. The 2024 approach is the Spark-natural one — no row explosion, pure column expressions, and it preserves the distinction between "no data" and "interpolated data".
+
+## Known inconsistencies
+
+- `opdi/sql/create_tables_*.sql` creates `opdi_flight_list_v2`, but all Python uses `opdi_flight_list`. The SQL is stale.
+- `opdi/docs/pipeline_overview.rst` misdescribes the phase algorithm (says "vertical-rate thresholds"; it is fuzzy logic), the measurements (says "between consecutive events"; they are cumulative from track start), and the track grouping key.
+- `opdi_h3_airspace_ref` is generated by step 00c and **read by nothing** — no airspace/FIR events exist.
+- `opdi` has **no tests**, despite `pyproject.toml` setting `testpaths = ["tests"]`.
+- `opdi-portal/content/methodology.qmd` "Past Releases" stops at 2024-12-01 while releases run through 202606.
