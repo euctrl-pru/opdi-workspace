@@ -86,15 +86,25 @@ Ordered stages, each a `DataFrame.transform`-able function:
    - neither `lat` nor `lon` changed → NULL both
    - none of `lat`/`lon`/`baro_altitude` changed → NULL all three
    - none of `vert_rate`/`heading`/`velocity` changed → NULL all three
-4. **Derivative spike filter** — port `MyFilterDerivative` with its **≥2-vote kill rule**: a point dies only if it participates in ≥2 flagged derivative windows, which targets the middle of a spike while sparing legitimate step changes. Uses real Δt, and `heading` must be unwrapped (period 360) first. Thresholds, converted to the OPDI unit system (metres, m/s):
+4. **Derivative spike filter** — port `MyFilterDerivative` with its **≥2-vote kill rule**: a point dies only if it participates in ≥2 flagged derivative windows. Uses real Δt, computed over *valid* values only (Alligier compacts NaNs out before differencing, so a plain `lag()` is wrong — it would span rows an earlier stage already NULLed). `heading` needs unwrapping (period 360); a shortest-angular-difference expression is equivalent and avoids a cumulative pass.
 
-   | column | 1st deriv | 2nd deriv |
-   |---|---|---|
-   | `baro_altitude`/`geo_altitude` | 200 ft/s | 50 |
-   | `vert_rate` | 1500 ft/min/s | 1000 |
-   | `velocity` | 12 kt/s | 10 |
-   | `heading` | 12 °/s | 10 |
-   | `lat`/`lon` | 0.01 °/s | 0.06 |
+   **Thresholds stay in aviation units** — OPDI publishes in ft/kt/FL, and these are the numbers Alligier states. Storage stays SI: the filter's only output is a NULL mask, and a mask carries no unit, so each column is scaled into its aviation unit purely to evaluate the comparison and the mask is applied to the untouched SI column. Nothing is converted on disk.
+
+   | column | 1st deriv | 2nd deriv | scale factor from SI |
+   |---|---|---|---|
+   | `baro_altitude` | 200 ft/s | 50 ft/s | ×3.28084 (m→ft) |
+   | `geo_altitude` | 200 ft/s | **150 ft/s** | ×3.28084 (m→ft) |
+   | `vert_rate` | 1500 ft/min/s | 1000 ft/min/s | ×196.850394 (m/s→ft/min) |
+   | `velocity` | 12 kt/s | 10 kt/s | ×1.94384 (m/s→kt) |
+   | `heading` | 12 °/s | 10 °/s | — |
+   | `lat`/`lon` | 0.01 °/s | 0.06 °/s | — |
+
+   Three corrections against the source, all of which would have been silent (`filterclassic.py`):
+   - **Votes are tallied per derivative order and OR-ed** (`killa>=2 or killv>=2`, line 191), never summed. Summing lets one 1st-derivative vote plus one 2nd-derivative vote kill a legitimate step change — the exact case the rule exists to protect.
+   - **Both derivatives carry the same unit**, `[column]/s`. The 2nd is a difference of *raw* differences over a mean timestep (line 181), not a rate-of-a-rate, so it never acquires an `s²`.
+   - **`geo_altitude` takes a looser 2nd threshold than `baro_altitude`** (150 vs 50, lines 139-140) because GNSS is noisier. Do not collapse them into one altitude row.
+
+   Caveat on "spares legitimate step changes": it spares steps *between* the two thresholds. A step exceeding the 2nd-derivative threshold is still killed. The margin between d1 and d2 **is** the manoeuvre tolerance — which is why lat/lon sets d2 six times higher than d1.
 
 5. **Isolated-point removal** — per column, NULL where the value is >20 s from any other valid value of that column: `dt = min(t − t_prev_valid, t_next_valid − t)`.
 6. **Gap segmentation** — a `segment_id` on 5-minute gaps, so downstream detectors never interpolate across a coverage hole.
