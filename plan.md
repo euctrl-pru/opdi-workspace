@@ -139,7 +139,7 @@ Rewrite `_categorize_landing_take_off` and `_compute_flight_table` in [flights.p
 - **Replace "ambiguous → drop" with a confidence score.** Keep the record, emit `adep_confidence`/`ades_confidence`, and let consumers filter. This alone recovers flights currently lost.
 - **Retain `ADEP_P`/`ADES_P`** runner-up semantics already documented in the portal methodology.
 
-### 3b. ATOT / ALDT with runway ID (T08 / T17)
+### 3b. ATOT / ALDT with runway ID (≈T08 / T17)
 
 Do **not** rewrite runway geometry — v0.0.2 already emits `entry-runway`/`exit-runway` via HexAero H3 res-12 matching, with the OSM runway designator carried in `info.osm_ref` ([events.py:365-490](opdi/src/opdi/pipeline/events.py#L365-L490)).
 
