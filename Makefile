@@ -43,11 +43,13 @@ osn-clone:  ## Print the shallow-clone recipe for the OpenSky server
 	@echo "Do NOT clone the meta-repo: traffic/ and the PRC repos are"
 	@echo "reference material and only bloat the checkout."
 
-test:  ## Run the opdi test suite
-	cd opdi && python -m pytest -q
+PYTHON ?= python3
+
+test:  ## Run the opdi test suite (local Spark, no cluster or credentials)
+	cd opdi && $(PYTHON) -m pytest tests -q
 
 bench:  ## Run milestone benchmarks against EUROCONTROL ground truth
-	cd opdi && python -m pytest benchmarks -q
+	cd opdi && $(PYTHON) -m pytest benchmarks -q
 
 paper:  ## Render the Quarto papers (offline; no DB access needed)
 	cd opdi-portal/papers && quarto render
