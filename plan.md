@@ -140,14 +140,24 @@ A registry of `applyInPandas` functions, **off by default**, guarded by `Cleanin
 
 ### 3a. Improved ADEP/ADES detection (highest value — fixes flight list gaps)
 
-Rewrite `_categorize_landing_take_off` and `_compute_flight_table` in [flights.py](opdi/src/opdi/pipeline/flights.py). Replace the sign-count vote with an evidence-scoring model per `(track_id, apt_ident)`:
+> **Researched 2026-08-05.** Seven methodologies benchmarked against APDF on
+> 2025-06-05 (32,404 flights, 35.4 M state vectors). Harness:
+> `opdi/benchmarks/adep_ades.py`; write-up:
+> `opdi-portal/papers/adep-ades-detection/`. Several hypotheses below were
+> **falsified** — they are kept, struck through, with what was measured.
 
-- **Use `on_ground`** — currently selected into `columns_of_interest` ([flights.py:190](opdi/src/opdi/pipeline/flights.py#L190)) and then never used. A confirmed ground sample near an airport is the single strongest signal available.
-- **Use `vert_rate`** — also selected and unused. Sustained ROC/ROD sign is far more robust than differencing a smoothed altitude.
-- **Use the ring bands** — `min_c_radius_nm`/`max_c_radius_nm` already exist in the reference table but are collapsed by a single `max_c_radius_nm <= 30` filter ([h3_airport_zones.py:401](opdi/src/opdi/reference/h3_airport_zones.py#L401)). A track that descends monotonically through 40→30→20→10→0 NM bands is an arrival regardless of altitude noise.
-- **Raise the altitude ceiling adaptively** — `MAX_FL = 40` truncates evidence for airports with high elevation or long straight-in approaches.
-- **Replace "ambiguous → drop" with a confidence score.** Keep the record, emit `adep_confidence`/`ades_confidence`, and let consumers filter. This alone recovers flights currently lost.
+Rewrite `_categorize_landing_take_off` and `_compute_flight_table` in [flights.py](opdi/src/opdi/pipeline/flights.py). The measured conclusion is that the evidence-scoring model this section originally proposed is the wrong shape: **no vertical-trend signal improves on "nearest aerodrome to the track endpoint" on the flights where both fire.** What the trend logic actually supplies is abstention, and supplying it explicitly is both simpler and strictly better.
+
+- ~~**Use `on_ground`** — the single strongest signal available.~~ **Falsified.** On-ground evidence (M2) covers only 24.76% of flights, and in a precision-ordered cascade it is 7.92% accurate on the flights it uniquely answers, against 47.08% for the endpoint rule on the same flights. Ground reception is too sparse and too often present at only one end of a track.
+- ~~**Use `vert_rate`** — far more robust than differencing a smoothed altitude.~~ **Half right.** M3 does beat the production algorithm (57.42% coverage / 97.39% accuracy vs 54.78% / 98.25%), so `vert_rate` is the better of the two trend signals — but it is still dominated by endpoint proximity, losing 8 points of accuracy to it on its own flights.
+- ~~**Use the ring bands.**~~ **Unlikely to help.** Radius is nearly inert: sweeping the endpoint distance threshold from 10 NM to 40 NM moves ADEP coverage by 0.2 pp. Effort spent on ring geometry buys almost nothing.
+- **Raise the altitude ceiling adaptively** — **confirmed, and it is the dominant parameter.** The right form is height **above field elevation**, not flight level: a fixed cut means nothing at an aerodrome at 5,000 ft. Moving the cut from on-ground-only to 5,000 ft AGL moves ADEP coverage by 34 pp.
+- **Replace "ambiguous → drop" with a confidence score** — **confirmed, and this is the whole of the problem.** Coverage, not accuracy, is what the current algorithm gets wrong; it is the second most accurate method tested and fifth by overall correctness.
 - **Retain `ADEP_P`/`ADES_P`** runner-up semantics already documented in the portal methodology.
+
+**Implementation to adopt** (pending full-month confirmation): nearest aerodrome to the track's first/last sample, emitted only when that endpoint is within *d* NM of the aerodrome and no more than *h* ft above its elevation. At *d*=10 NM, *h*=5,000 ft this gives **58.79% ADEP coverage at 99.40% accuracy**, beating production on both axes at once. Both parameters should be published with the flight list, and the abstention reason retained per flight so consumers can distinguish "no departure aerodrome" from "not determinable".
+
+**Still open before implementing:** full-month runs for 2024-06 and 2025-06 (fit on one, validate on the other); the cleaning ablation (§2 may *remove* the gate samples this method depends on — the stale-broadcast filter nulls repeated positions, which is what a parked aircraft transmits); per-aerodrome arrival/departure counts vs APDF; and the aerodrome-set sweep.
 
 ### 3b. ATOT / ALDT with runway ID (≈T08 / T17)
 
@@ -300,12 +310,19 @@ The stale **past-releases table is in [content/roadmap.qmd:38-43](opdi-portal/co
 ## Sequencing
 
 1. ~~Meta-repo + submodules + `CLAUDE.md` (Part 1)~~ — **done**, incl. `opdi/reference/` scaffolding and git-lfs declaration.
-2. `opdi/reference/` extraction scripts + first ground-truth pull (Part 4 inputs) — you run these on the work laptop; monthly loop required. **Next.**
-3. `cleaning/native.py` + unit tests (Part 2a).
-4. ADEP/ADES rewrite + coverage benchmark (Part 3a) — highest value, and the benchmark quantifies the existing gap.
+2. ~~`opdi/reference/` extraction scripts + first ground-truth pull (Part 4 inputs)~~ — **done**: `apdf`/`flights` × `202406`/`202506` committed under git-lfs and mirrored to S3 for the executors.
+3. ~~`cleaning/native.py` + unit tests (Part 2a)~~ — **done**, 21 tests, the repo's first. Not yet applied to any benchmark; the ablation is step 4c.
+4. **ADEP/ADES (Part 3a) — in progress.** The research is done and reported; what remains is confirmation and then the rewrite.
+   - 4a. ~~Benchmark harness + seven-method comparison~~ — **done**, `benchmarks/adep_ades.py`.
+   - 4b. ~~First write-up~~ — **done**, `opdi-portal/papers/adep-ades-detection/`.
+   - 4c. Full-month runs, 2024-06 and 2025-06 — fit any threshold on one month, validate on the other. **Next.**
+   - 4d. Cleaning ablation: best method on cleaned vs raw tracks. Genuinely uncertain — the stale-broadcast stage may delete the parked-aircraft samples the endpoint rule relies on.
+   - 4e. Per-aerodrome arrival/departure counts vs APDF (the 90 aerodromes APDF covers).
+   - 4f. Aerodrome-set sweep (large / +medium / +small / +heliports) and aircraft-class unknown handling.
+   - 4g. Then the `flights.py` rewrite, under a new `version` string.
 5. Wire `opdi_h3_airspace_ref` → T11 / T14 / FIR crossings (§3d) — one integration, three milestones, no new dependencies.
 6. ATOT/ALDT + rings (Parts 3b, 3c) + their benchmarks.
-7. Paper (Part 5).
+7. Fold the results into the portal's methodology/roadmap pages (Part 5).
 
 ## Verification
 
