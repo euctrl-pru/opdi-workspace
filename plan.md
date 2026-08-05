@@ -157,7 +157,9 @@ Rewrite `_categorize_landing_take_off` and `_compute_flight_table` in [flights.p
 
 **Implementation to adopt** (pending full-month confirmation): nearest aerodrome to the track's first/last sample, emitted only when that endpoint is within *d* NM of the aerodrome and no more than *h* ft above its elevation. At *d*=10 NM, *h*=5,000 ft this gives **58.79% ADEP coverage at 99.40% accuracy**, beating production on both axes at once. Both parameters should be published with the flight list, and the abstention reason retained per flight so consumers can distinguish "no departure aerodrome" from "not determinable".
 
-**Still open before implementing:** full-month runs for 2024-06 and 2025-06 (fit on one, validate on the other); the cleaning ablation (§2 may *remove* the gate samples this method depends on — the stale-broadcast filter nulls repeated positions, which is what a parked aircraft transmits); per-aerodrome arrival/departure counts vs APDF; and the aerodrome-set sweep.
+**Still open before implementing:** the three-day samples in each of 2024-06 and 2025-06 (fit thresholds on one month, validate on the other a year apart); the cleaning ablation (§2 may *remove* the gate samples this method depends on — the stale-broadcast filter nulls repeated positions, which is what a parked aircraft transmits); per-aerodrome arrival/departure counts vs APDF; and the aerodrome-set sweep.
+
+Full-month sampling was scoped out on 2026-08-05: three days is ~97,000 ground-truth flights, which is ample for fitting two thresholds. The residual risk is representativeness — day-of-week and seasonal effects — not statistical power, and a second month a year apart addresses the part of that which matters.
 
 ### 3b. ATOT / ALDT with runway ID (≈T08 / T17)
 
@@ -315,7 +317,7 @@ The stale **past-releases table is in [content/roadmap.qmd:38-43](opdi-portal/co
 4. **ADEP/ADES (Part 3a) — in progress.** The research is done and reported; what remains is confirmation and then the rewrite.
    - 4a. ~~Benchmark harness + seven-method comparison~~ — **done**, `benchmarks/adep_ades.py`.
    - 4b. ~~First write-up~~ — **done**, `opdi-portal/papers/adep-ades-detection/`.
-   - 4c. Full-month runs, 2024-06 and 2025-06 — fit any threshold on one month, validate on the other. **Next.**
+   - 4c. Three-day runs in 2024-06 and 2025-06 — fit any threshold on one, validate on the other a year apart. **Next.**
    - 4d. Cleaning ablation: best method on cleaned vs raw tracks. Genuinely uncertain — the stale-broadcast stage may delete the parked-aircraft samples the endpoint rule relies on.
    - 4e. Per-aerodrome arrival/departure counts vs APDF (the 90 aerodromes APDF covers).
    - 4f. Aerodrome-set sweep (large / +medium / +small / +heliports) and aircraft-class unknown handling.
