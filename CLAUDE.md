@@ -81,7 +81,30 @@ Also: `AP_C_RWY` (runway), `AP_C_STND` (stand), `C40_/C100_CROSS_{TIME,LAT,LON,F
 ## Working practices
 
 - **Benchmark every new milestone** against `eurocontrol` ground truth. Reproducible, committed as parquet under `opdi/reference/`, documented in a Quarto paper under `opdi-portal/papers/`.
-- **Papers must render offline.** `quarto render` requires no credentials and no DB — every figure reads a committed cache. This is an existing portal guarantee; do not break it.
+- **Papers render by running their analysis.** A paper's `.qmd` invokes its
+  regeneration entrypoint (`benchmarks/regenerate_v6.py` for the V6 study)
+  before drawing anything, so the figures are what the checked-out code
+  produces rather than what someone once copied into `data/`. The entrypoint is
+  idempotent: it re-runs a job only when the *source files that job depends on*
+  have changed since its output was written, so a render with everything
+  current is a fast no-op. Rendering a stale paper therefore needs cluster
+  credentials, and that is intended — the numbers come from Spark over S3
+  against Network Manager reference data and cannot be recomputed without it.
+  `OPDI_RENDER=check` fails fast on staleness; `OPDI_RENDER=allow-stale`
+  renders a draft anyway, and the paper's provenance table then shows which
+  figures are unverified.
+  **This reverses the earlier "papers must render offline" rule** (decided
+  2026-08-10). Papers V1–V5 and the decimation study pre-date the change and
+  still read committed caches; they have no regeneration entrypoint, and their
+  numbers are traceable only to the version that published them.
+- **Every committed figure carries provenance.** `benchmarks/provenance.py`
+  stamps each output with the script, argv, git SHA, dirty flag and a
+  fingerprint over the source files it depends on, written to
+  `data/_manifest.json` beside the CSVs. An output with no manifest entry is
+  reported in the paper as unverified rather than shown as fact. This exists
+  because three staged CSVs were once found to derive from tables written days
+  earlier by different parameters, and nothing in the file or its timestamp
+  said so.
 - Respect documented **negative results** from the PRC challenges — see below.
 - When touching a submodule: commit inside it first, then commit the updated pointer in the meta-repo.
 
