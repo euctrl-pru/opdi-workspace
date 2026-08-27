@@ -52,8 +52,16 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
 - **Everything is native Spark** — column expressions and window functions partitioned by `track_id`. No `traffic`, no `applyInPandas`, no `pandas_udf` anywhere in the current codebase. Introducing one is a deliberate architectural step, not a default.
 - **Units: storage is SI, everything human-facing is aviation.** The OSN schema is SI — altitudes in **metres**, velocity and `vert_rate` in **m/s** — because it mirrors OpenSky's own schema. Everything OPDI *publishes* is aviation: `events.py` emits `altitude_ft`, `roc_ft_min`, `speed_kt`, `FL`, `cumulative_distance_nm`, converting at point of use (`* 3.28084` → ft, `* 196.850394` → ft/min, `* 1.94384` → kt).
   **New config thresholds go in aviation units, with the unit in the field name** (`baro_altitude_d1_max_ft_s`, not a converted SI constant). Where a threshold must meet SI data, scale the *comparison*, not the stored value — `cleaning/native.py:AVIATION_UNIT_FACTOR` is the pattern, and it works there because the output is a NULL mask, which carries no unit. Reuse the constants above rather than introducing new ones, so the two can never drift. Getting units wrong is the most likely source of a silent bug: a threshold 3.28× too large simply never fires.
-- **Do not convert the storage layer to aviation units.** `track_gap_low_altitude_meters` feeds `tracks.py:_add_track_id`, which is frozen; changing it breaks `track_id` continuity with all published data. The `osn_tracks` DDL comments are also a published contract.
-- **Track splitting is frozen.** `tracks.py:_add_track_id` is marked `CRITICAL - DO NOT MODIFY` — changing it breaks `track_id` continuity with all published data.
+- **Do not convert the storage layer to aviation units.** `track_gap_low_altitude_meters` feeds the gap family of segmentation rules, whose thresholds are a published contract; changing it breaks `track_id` continuity with data published under those thresholds. The `osn_tracks` DDL comments are also a published contract.
+- **Track identity is a versioned choice, not a frozen rule.** As of 2026-08-27
+  the default segmentation is A8 `recommended` (group on `icao24`, break on a
+  genuine non-blank callsign change with the lookback bounded to the gap
+  threshold), selected through `src/opdi/pipeline/segmentation/`. **`track_id`
+  changes shape from the next production run forward** — A8 carries no
+  `_{year}_{month}` suffix, so identifiers become `{hash}_{offset}` and any
+  consumer parsing the suffix breaks. Past months will not reproduce. Every
+  dataset published before this date used the legacy rule, which stays
+  reachable as the `legacy` arm. See `opdi-portal/papers/track-construction-v1/`.
 - **Never mutate a published `version` string.** New algorithms get a new `version`; existing event types keep theirs so released data stays reproducible.
 - Executors run `docker/Dockerfile` → `quintengs/opdi-spark`. Any new runtime dependency must be added there or executors will fail at import.
 
