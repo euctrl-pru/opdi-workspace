@@ -31,6 +31,7 @@ The data model (see `opdi-portal/content/concepts.qmd`):
 - **MEASUREMENT** — a metric attached to an event by `event_id`.
 
 Published event types (v0.0.2): `take-off`, `landing`, `top-of-climb`, `top-of-descent`, `level-start`, `level-end`, `first-/last-xing-fl{50,70,100,245}`, `entry-/exit-{runway,taxiway,apron,hangar,threshold,parking_position,deicing_pad}`, `first_seen`, `last_seen`.
+Beside it, `events_v0.2.0` retires `take-off`/`ATOT`/`ALDT`/`AOBT`/`AIBT`/`entry-runway`/`exit-runway` for the A-CDM runway family `line-up`, `take-off-roll`, `airborne`, `landing` (T16 — same name, now a threshold crossing, not the old descent-to-ground event), `touchdown`, `runway-vacated`, `off-block`, `on-block`, `go-around`, `runway-crossing-entry`/`runway-crossing-vacated`, plus a second top-of-climb/top-of-descent pair (`top-of-climb-cco`/`top-of-descent-cdo`) published alongside the original; still pending its benchmark campaign — see `opdi-portal/papers/flight-events-v4/`.
 
 ## Pipeline layout (`opdi/`)
 
