@@ -31,6 +31,7 @@ The data model (see `opdi-portal/content/concepts.qmd`):
 - **MEASUREMENT** — a metric attached to an event by `event_id`.
 
 Published event types (v0.0.2): `take-off`, `landing`, `top-of-climb`, `top-of-descent`, `level-start`, `level-end`, `first-/last-xing-fl{50,70,100,245}`, `entry-/exit-{runway,taxiway,apron,hangar,threshold,parking_position,deicing_pad}`, `first_seen`, `last_seen`.
+Beside it, `events_v0.2.0` adds the A-CDM runway family `line-up`, `take-off-roll`, `airborne` (T08), `landing` (T16 — same name, now a threshold crossing, not the old descent-to-ground event), `touchdown` (T17), `runway-vacated`, `go-around`, `runway-crossing-entry`/`runway-crossing-vacated`; renames the block times `AOBT`/`AIBT`→`off-block`/`on-block`; retires the fuzzy `take-off` and old-meaning `landing` and the undifferentiated `entry-runway`/`exit-runway`; and publishes a second `top-of-climb-cco`/`top-of-descent-cdo` pair alongside the fuzzy tops. **It RETAINS `ATOT`/`ALDT` alongside `airborne`/`touchdown`, not retired.** The flight-events-v4 benchmark (`opdi-portal/papers/flight-events-v4/`) has run: `airborne`/`touchdown` are the interpolated 15 ft-AGL crossing (accurate, ~±2 s where APDF resolves to the second, vs `ATOT`'s structural +19 s) and, once a null-barometric-altitude ground-sample height bug was fixed, reach ATOT/ALDT-class coverage (airborne 76.6% vs `ATOT` 63.3%; touchdown 80.4% vs `ALDT` 86.1%) — and, pooled with the older pair as v0.2.0 actually publishes them, answer **96.2%** of reachable departures and **96.0%** of arrivals (V3 single-detector: 63.30%/86.06%), because the two methods fail on different flights — but they read samples near the runway (surface/low reception + the oa_runways H3 grid) that `ATOT`/`ALDT`'s 1500 ft climb/descent window does not need, so both methods are kept and consumers choose. See the paper's "Timing a runway movement" chapter for the two methods and their differences.
 
 ## Pipeline layout (`opdi/`)
 
@@ -52,9 +53,64 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
 - **Everything is native Spark** — column expressions and window functions partitioned by `track_id`. No `traffic`, no `applyInPandas`, no `pandas_udf` anywhere in the current codebase. Introducing one is a deliberate architectural step, not a default.
 - **Units: storage is SI, everything human-facing is aviation.** The OSN schema is SI — altitudes in **metres**, velocity and `vert_rate` in **m/s** — because it mirrors OpenSky's own schema. Everything OPDI *publishes* is aviation: `events.py` emits `altitude_ft`, `roc_ft_min`, `speed_kt`, `FL`, `cumulative_distance_nm`, converting at point of use (`* 3.28084` → ft, `* 196.850394` → ft/min, `* 1.94384` → kt).
   **New config thresholds go in aviation units, with the unit in the field name** (`baro_altitude_d1_max_ft_s`, not a converted SI constant). Where a threshold must meet SI data, scale the *comparison*, not the stored value — `cleaning/native.py:AVIATION_UNIT_FACTOR` is the pattern, and it works there because the output is a NULL mask, which carries no unit. Reuse the constants above rather than introducing new ones, so the two can never drift. Getting units wrong is the most likely source of a silent bug: a threshold 3.28× too large simply never fires.
-- **Do not convert the storage layer to aviation units.** `track_gap_low_altitude_meters` feeds `tracks.py:_add_track_id`, which is frozen; changing it breaks `track_id` continuity with all published data. The `osn_tracks` DDL comments are also a published contract.
-- **Track splitting is frozen.** `tracks.py:_add_track_id` is marked `CRITICAL - DO NOT MODIFY` — changing it breaks `track_id` continuity with all published data.
+- **Do not convert the storage layer to aviation units.** `track_gap_low_altitude_meters` feeds the gap family of segmentation rules, whose thresholds are a published contract; changing it breaks `track_id` continuity with data published under those thresholds. The `osn_tracks` DDL comments are also a published contract.
+- **Track identity is a versioned choice, not a frozen rule.** As of 2026-08-27
+  `config.segmentation.method` defaults to `standard` — the production name
+  for the arm the segmentation study calls `recommended` (`"A8"` there): group
+  on `icao24` alone, break on a genuine non-blank callsign change with the
+  lookback bounded to the gap threshold, selected through
+  `src/opdi/pipeline/segmentation/`. **`track_id` changes shape from the next
+  production run forward** — `standard` carries no `_{year}_{month}` suffix,
+  so identifiers become `{hash}_{offset}` and any consumer parsing the suffix
+  breaks. Past months will not reproduce. Every dataset published before this
+  date used the legacy rule, which stays reachable as the `legacy` arm and
+  reproduces pre-release ids byte for byte. See
+  `opdi-portal/papers/track-construction-v1/` for the eight-rule benchmark
+  that selected `standard`, and `opdi-portal/papers/track-construction-v2/`
+  for the release note confirming the real pipeline — not just the harness —
+  reproduces that result.
+- **The segmentation that built a table carries no marker, so the
+  legacy-reproduction guards check the run's configuration, not the data
+  (ruling R20).** `osn_tracks` has no column recording which rule produced a
+  row. `flights.py`'s `_version_for` and `events.py`'s callsign-resolution
+  guard both decide whether to skip `resolve_flight_id` by reading how the
+  *run* is configured — `self.detection == DetectionConfig.legacy()` plus
+  `tracks_table == "osn_tracks"` in `flights.py`,
+  `config.events_version != LEGACY_EVENTS_VERSION` in `events.py` — because
+  that is the only thing either module can see. Neither can ask the question
+  it actually needs answered: were the tracks being read built with `legacy`?
+  A legacy-stamped run over an `osn_tracks` that was rebuilt with `standard`
+  therefore skips callsign resolution while stamping the frozen version, and a
+  track carrying two callsigns fans out into duplicate rows with nothing in
+  the output revealing why. Anyone reprocessing a released month with
+  `legacy` must confirm out of band that the tracks it reads were actually
+  built with `legacy` — nothing in the pipeline checks that for them.
+- **`flight_id` must carry exactly one value per `track_id`, and the rule that
+  enforces it lives in one place.** `flight_id` is used as a grouping and join
+  key at several sites in both `flights.py` and `events.py`, and never
+  aggregated — safe only while every track is callsign-homogeneous, which
+  legacy segmentation guarantees by construction (callsign is part of its
+  group key) and `standard` does not. `resolve_flight_id`, in `flights.py`,
+  restores the invariant at the point the track table is read, over the
+  unfiltered frame; `events.py` imports it rather than reimplementing it.
+  **Do not copy it.** Two independent copies of this exact rule — one in
+  production, one in the V7 ADEP/ADES benchmark — already drifted apart once,
+  which is part of why this study exists.
 - **Never mutate a published `version` string.** New algorithms get a new `version`; existing event types keep theirs so released data stays reproducible.
+- **A benchmark driving the real pipeline steps must own its progress log and
+  empty it before use.** `FlightListProcessor` records finished months in
+  local parquet files under `log_dir` (default `OPDI_live/logs`), and
+  `build_endpoint_candidates` is guarded by its own `rebuild` flag, which
+  `skip_if_processed` deliberately does not control — right for a threshold
+  sweep against fixed tracks, wrong once the *tracks* differ between arms.
+  Production progress-tracking assumes its tables persist and its inputs are
+  fixed; a benchmark that varies the input per arm and deletes its S3 tables
+  at the end of each iteration violates both, so a marker can outlive the
+  table it describes and the next arm silently skips work whose output no
+  longer exists. This cost two failed multi-hour runs in the
+  track-construction v2 study — see `track_pipeline_v2.flight_list_log_dir`,
+  which fixes it by giving each arm a private
+  `OPDI_live/logs/tcv2/<method>/` directory, deleted before use.
 - Executors run `docker/Dockerfile` → `quintengs/opdi-spark`. Any new runtime dependency must be added there or executors will fail at import.
 
 ## Ground truth (`eurocontrol/`)
@@ -81,7 +137,40 @@ Also: `AP_C_RWY` (runway), `AP_C_STND` (stand), `C40_/C100_CROSS_{TIME,LAT,LON,F
 ## Working practices
 
 - **Benchmark every new milestone** against `eurocontrol` ground truth. Reproducible, committed as parquet under `opdi/reference/`, documented in a Quarto paper under `opdi-portal/papers/`.
-- **Papers must render offline.** `quarto render` requires no credentials and no DB — every figure reads a committed cache. This is an existing portal guarantee; do not break it.
+- **Papers render by running their analysis.** A paper's `.qmd` invokes its
+  regeneration entrypoint (`benchmarks/regenerate_v6.py` for the V6 study)
+  before drawing anything, so the figures are what the checked-out code
+  produces rather than what someone once copied into `data/`. The entrypoint is
+  idempotent: it re-runs a job only when the *source files that job depends on*
+  have changed since its output was written, so a render with everything
+  current is a fast no-op. Rendering a stale paper therefore needs cluster
+  credentials, and that is intended — the numbers come from Spark over S3
+  against Network Manager reference data and cannot be recomputed without it.
+  `OPDI_RENDER=check` fails fast on staleness; `OPDI_RENDER=allow-stale`
+  renders a draft anyway, and the paper's provenance table then shows which
+  figures are unverified.
+  **This reverses the earlier "papers must render offline" rule** (decided
+  2026-08-10). Papers V1–V5 and the decimation study pre-date the change and
+  still read committed caches; they have no regeneration entrypoint, and their
+  numbers are traceable only to the version that published them.
+- **Every committed figure carries provenance.** `benchmarks/provenance.py`
+  stamps each output with the script, argv, git SHA, dirty flag and a
+  fingerprint over the source files it depends on, written to
+  `data/_manifest.json` beside the CSVs. An output with no manifest entry is
+  reported in the paper as unverified rather than shown as fact. This exists
+  because three staged CSVs were once found to derive from tables written days
+  earlier by different parameters, and nothing in the file or its timestamp
+  said so.
+- **A fingerprint cannot tell a comment from a computation.**
+  `benchmarks/provenance.py` hashes the raw bytes of every declared
+  `code_path`, so any edit to a declared dependency — a docstring fix, a
+  comment, a type annotation — marks every output that declares it stale,
+  identically to an edit that changes what the code computes. After an
+  expensive run, a comment fix to a benchmark module is not free: make it
+  before the run, or accept the stale flag and say in the paper why the
+  numbers did not need to change. Do not hand-stamp a manifest to clear it —
+  the mechanism is only worth having because it cannot be talked out of
+  flagging something.
 - Respect documented **negative results** from the PRC challenges — see below.
 - When touching a submodule: commit inside it first, then commit the updated pointer in the meta-repo.
 
@@ -101,7 +190,12 @@ The two winning solutions are the best available evidence on ADS-B cleaning. Key
 ## Known inconsistencies
 
 - `opdi/sql/create_tables_*.sql` creates `opdi_flight_list_v2`, but all Python uses `opdi_flight_list`. The SQL is stale.
-- `opdi/docs/pipeline_overview.rst` misdescribes the phase algorithm (says "vertical-rate thresholds"; it is fuzzy logic), the measurements (says "between consecutive events"; they are cumulative from track start), and the track grouping key.
+- `opdi/docs/pipeline_overview.rst` misdescribes the phase algorithm (says "vertical-rate thresholds"; it is fuzzy logic), the measurements (says "between consecutive events"; they are cumulative from track start), and the track grouping key. It also pre-dates track-construction v2: `:56-58` describes `track_id` assignment purely as `(icao24, callsign)` grouping split on a fixed time gap and hashed with SHA-256, as if that were the only algorithm. It does not mention `config.segmentation.method`, the `standard` default, or `legacy` as a selectable arm reproducing the pre-release ids that description still matches.
 - `opdi_h3_airspace_ref` is generated by step 00c and **read by nothing** — no airspace/FIR events exist.
-- `opdi` has **no tests**, despite `pyproject.toml` setting `testpaths = ["tests"]`.
+- ~~`opdi` has **no tests**~~ — **out of date.** `opdi` has a real suite (260
+  tests as of 2026-08-23) under `tests/`, run with
+  `.venv310/bin/python -m pytest tests/`. It uses a local Spark session via the
+  `spark` fixture in `conftest.py` — no cluster, no credentials — so the pure
+  column expressions and config presets are testable on a laptop. Anything
+  needing S3 or the cluster is not, and stays in `benchmarks/`.
 - `opdi-portal/content/roadmap.qmd:38-43` past-releases table stops at OPDI v0.0.2 (release 3), 2024-12-01. `methodology.qmd:8` separately claims "Latest available methodology versions: v0.0.2 (May/June 2024)". Both are stale; confirm the real current release month against published data before rewriting either.
