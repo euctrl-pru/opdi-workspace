@@ -63,6 +63,16 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
   consumer parsing the suffix breaks. Past months will not reproduce. Every
   dataset published before this date used the legacy rule, which stays
   reachable as the `legacy` arm. See `opdi-portal/papers/track-construction-v1/`.
+  A9 `debounced` (`callsign_min_persistence_seconds`, `feat/segmentation-callsign-debounce`)
+  is **available but not the default** — it requires a callsign to persist for
+  a threshold before treating a change as real, suppressing splits caused by a
+  callsign flickering to a garbled value and back (measured: 23.1% of A8's
+  track boundaries trace to a flicker leg; the arm gives ~19% fewer tracks,
+  merge-neutral against A8). It defaults to `0`, which reproduces A8 exactly.
+  Promoting it to default would change `track_id` again, the same cost A8
+  itself carried — a decision for the owner of the published contract, not
+  made by this note. See `opdi-portal/papers/track-construction-v3/` (commit
+  8bd2f30 documents the A9 investigation).
 - **Never mutate a published `version` string.** New algorithms get a new `version`; existing event types keep theirs so released data stays reproducible.
 - Executors run `docker/Dockerfile` → `quintengs/opdi-spark`. Any new runtime dependency must be added there or executors will fail at import.
 
