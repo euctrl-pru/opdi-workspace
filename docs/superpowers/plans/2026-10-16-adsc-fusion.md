@@ -21,6 +21,7 @@
 - **The `source` column is added only when `adsc.enabled` is true.** A column present in new partitions of a production table and absent from old ones breaks `spark.read.parquet` schema inference silently. The Iceberg DDLs in `tracks.py` and `cleaning/cleaner.py` are **not** changed.
 - **ADS-C rows carry `callsign = NULL`.** The feed's `flight` field is the IATA number (`LH133`), not the ICAO callsign ADS-B broadcasts (`DLH133`).
 - **ADS-C is never thinned.** The 5 s decimation rules (`modulo`, `bucket`) apply to ADS-B only.
+- **The ADS-C clock is skewed per airframe, by a measured median +1.48 s (IQR +0.32…+1.96 s, one airframe persistently −12.9 s).** Cross-track agreement with ADS-B is 9 m against 377 m along-track — a 43× ratio, so the residual is timing and not position. No global correction is applied (`time_offset_seconds = 0.0`): a constant would harm the airframes that are already synchronised to 0.01 s. See the spec's "Time synchronisation — measured" section.
 - **Benchmark period:** `2026-06-05`, `2026-06-06`, `2026-06-07`; APDF month `202606`; the twenty aerodromes in `events_gt.STUDY_AIRPORTS`. This is `events_gt.PERIODS["2026"]` — the flight-events-v4 period.
 - **Tests:** `opdi` → `.venv310/bin/python -m pytest tests/ -q`; `opdi-benchmarker` → `.venv/bin/python -m pytest tests/ -q`. Both run on a local Spark session with no credentials. Anything needing S3 belongs in `benchmarks/`, not `tests/`.
 - **Every committed figure carries provenance.** Benchmark outputs are staged through `benchmarks/provenance.py` and stamped in `data/_manifest.json`.
@@ -43,6 +44,7 @@
 | `benchmarks/adsc_census.py` | **Create.** What the feed contains, per sampled day. No pipeline dependency. |
 | `benchmarks/run_adsc_day.py` | **Create.** Runs both arms for one day into `research/adsc/{base,merged}`. |
 | `benchmarks/adsc_coverage_gain.py` | **Create.** Samples and track-minutes added, gaps bridged, fragmentation and merge-neutrality guards. |
+| `benchmarks/adsc_time_sync.py` | **Create.** Along/cross decomposition against interpolated ADS-B: how far apart the two clocks are, per airframe. |
 | `benchmarks/event_bench.py` | **Modify.** `PERIOD_TRACKS` entries for the two arms. |
 | `benchmarks/events_gt.py` | **Modify.** `PERIODS` entries for the two arms. |
 | `benchmarks/regenerate_adsc_v1.py` | **Create.** The paper's executable definition. |
@@ -54,6 +56,7 @@
 | `tests/test_adsc_steps.py` | **Create.** |
 | `tests/test_run_adsc_day.py` | **Create.** |
 | `tests/test_adsc_coverage_gain.py` | **Create.** |
+| `tests/test_adsc_time_sync.py` | **Create.** |
 | `tests/test_adsc_periods.py` | **Create.** |
 | `tests/test_regenerate_adsc_v1.py` | **Create.** |
 
@@ -462,7 +465,7 @@ cannot see whether the defaults are consistent.
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `opdi.config.AdscConfig(enabled: bool, s3_base: str, table: str, shadow_seconds: int)`; `OPDIConfig.adsc: AdscConfig`; `CleaningConfig.sparse_sources: Tuple[str, ...]`. Tasks 3–8 and 11 read these.
+- Produces: `opdi.config.AdscConfig(enabled: bool, s3_base: str, table: str, shadow_before_seconds: int, shadow_after_seconds: int, time_offset_seconds: float)`; `OPDIConfig.adsc: AdscConfig`; `CleaningConfig.sparse_sources: Tuple[str, ...]`. Tasks 3–8 and 11 read these.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -490,10 +493,18 @@ def test_defaults_name_the_readsb_topic():
     assert cfg.table == "osn_adsc_statevectors"
 
 
-def test_shadow_window_is_positive():
+def test_shadow_window_is_positive_on_both_sides():
     # Zero would mean "drop an ADS-C row only on an exact timestamp
     # collision", which no satellite report will ever produce.
-    assert AdscConfig().shadow_seconds > 0
+    cfg = AdscConfig()
+    assert cfg.shadow_before_seconds > 0 and cfg.shadow_after_seconds > 0
+
+
+def test_no_global_time_correction_by_default():
+    # The measured skew is per-airframe (+0.01 s to +2.09 s, one at -12.9 s).
+    # A constant would be wrong for nearly every aircraft and would damage the
+    # ones already synchronised, so the knob ships at zero.
+    assert AdscConfig().time_offset_seconds == 0.0
 
 
 def test_adsc_is_exempt_from_the_density_stages_by_default():
@@ -547,16 +558,46 @@ class AdscConfig:
     table: str = "osn_adsc_statevectors"
     """Where step 01b writes the mapped rows, in the run's own warehouse."""
 
-    shadow_seconds: int = 60
-    """Drop an ADS-C row when an ADS-B row for the same airframe is this close.
+    shadow_before_seconds: int = 60
+    """Drop an ADS-C row when an ADS-B row for the same airframe is this far
+    **behind** it.
 
-    The two feeds report the same aircraft from different links with different
-    latencies, so a near-coincident pair is two renderings of one position, not
-    two measurements. Keeping both puts a second point a few hundred metres
-    away at nearly the same instant, which reads downstream as a velocity
-    spike the derivative filter then has to arbitrate. ADS-B wins by
-    construction: it is denser, it is what every detector was tuned on, and it
-    carries `on_ground`.
+    The two feeds report the same aircraft from different links, so a
+    near-coincident pair is two renderings of one position, not two
+    measurements. Keeping both puts a second point a few hundred metres away at
+    nearly the same instant. ADS-B wins by construction: it is denser, it is
+    what every detector was tuned on, and it carries `on_ground`.
+
+    Split from a single symmetric window because the window is defined in a
+    **skewed** time base. Measured against interpolated ADS-B, ADS-C reports sit
+    a median +1.48 s ahead of where ADS-B puts the aircraft at the same
+    timestamp, and one airframe in twenty-five is persistently −12.9 s. "The
+    same observation" is therefore not centred on zero, and the two sides have
+    to be settable independently once that is known.
+    """
+
+    shadow_after_seconds: int = 60
+    """Drop an ADS-C row when an ADS-B row for the same airframe is this far
+    **ahead** of it. See :attr:`shadow_before_seconds`."""
+
+    time_offset_seconds: float = 0.0
+    """Seconds added to every ADS-C `event_time`. **Deliberately zero.**
+
+    The skew is real -- a median +1.48 s along-track displacement against
+    interpolated ADS-B, with a 43:1 along-to-cross ratio that rules out a
+    position error, and ADS-B's own position age (median 0.22 s, max 0.92 s)
+    too small to explain it. But it is a property of the **individual
+    airframe**, not of the feed: within an airframe the implied offset holds to
+    sigma 0.10-0.31 s, while between airframes it runs from +0.01 s to +2.09 s
+    with one at -12.9 s. A single constant would therefore be wrong for nearly
+    every aircraft and would actively damage the ones already synchronised.
+
+    The knob exists so a third arm can test a correction, not because one is
+    recommended. A per-airframe offset, estimated on coverage-overlap data and
+    applied where ADS-B is absent, is the real fix; it needs a stability study
+    over weeks before it could be believed, and 25 airframes on one day cannot
+    support it. See ``benchmarks/adsc_time_sync.py`` and the paper's
+    time-synchronisation chapter.
     """
 ```
 
@@ -923,6 +964,16 @@ class AdscIngestion:
         # to discard here.
         df = df.dropDuplicates(["icao24", "event_time", "lat", "lon"])
 
+        # The global time correction, normally a no-op. Applied here rather
+        # than at merge time so the written table is self-describing: whatever
+        # `osn_adsc_statevectors` holds is what the merge will union, and a run
+        # cannot silently mean two different things by one timestamp.
+        offset = float(self.config.adsc.time_offset_seconds)
+        if offset:
+            print(f"ADS-C: applying a global time offset of {offset:+.3f} s. "
+                  f"The measured skew is per-airframe -- see AdscConfig.")
+            df = df.withColumn("event_time", col("event_time") + lit(offset))
+
         df = df.withColumn(
             "event_time", from_unixtime(col("event_time")).cast("timestamp"))
         df = df.withColumn("event_time_day", to_date(col("event_time")))
@@ -983,7 +1034,7 @@ git commit -m "feat(adsc): map the readsb ADS-C topic into the OPDI state-vector
 
 **Interfaces:**
 - Consumes: `ADSC_SOURCE` (Task 3).
-- Produces: `shadow_filter(adsc: DataFrame, adsb: DataFrame, shadow_seconds: int) -> DataFrame` — the ADS-C rows with no ADS-B row for the same `icao24` within `shadow_seconds`. Both frames must carry `icao24` and a **timestamp** `event_time`. Task 6 calls it.
+- Produces: `shadow_filter(adsc: DataFrame, adsb: DataFrame, before_seconds: int, after_seconds: int) -> DataFrame` — the ADS-C rows with no ADS-B row for the same `icao24` in the window `[t − before_seconds, t + after_seconds]`. Both frames must carry `icao24` and a **timestamp** `event_time`. Task 6 calls it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1015,7 +1066,7 @@ def test_a_row_inside_the_window_is_dropped(spark):
     kept = shadow_filter(
         _adsc(spark, [("4acb41", T0 + dt.timedelta(seconds=10))]),
         _adsb(spark, [("4acb41", T0)]),
-        60,
+        60, 60,
     )
     assert kept.count() == 0
 
@@ -1024,20 +1075,20 @@ def test_a_row_outside_the_window_is_kept(spark):
     kept = shadow_filter(
         _adsc(spark, [("4acb41", T0 + dt.timedelta(seconds=600))]),
         _adsb(spark, [("4acb41", T0)]),
-        60,
+        60, 60,
     )
     assert kept.count() == 1
 
 
 def test_the_window_is_exact_at_both_edges(spark):
-    # Exactly `shadow_seconds` away is covered; one second beyond is not. An
+    # Exactly the half-window away is covered; one second beyond is not. An
     # off-by-a-bin implementation passes the two tests above and fails here.
     inside = shadow_filter(
         _adsc(spark, [("4acb41", T0 + dt.timedelta(seconds=60))]),
-        _adsb(spark, [("4acb41", T0)]), 60)
+        _adsb(spark, [("4acb41", T0)]), 60, 60)
     outside = shadow_filter(
         _adsc(spark, [("4acb41", T0 + dt.timedelta(seconds=61))]),
-        _adsb(spark, [("4acb41", T0)]), 60)
+        _adsb(spark, [("4acb41", T0)]), 60, 60)
     assert inside.count() == 0
     assert outside.count() == 1
 
@@ -1047,14 +1098,14 @@ def test_the_window_is_symmetric(spark):
     # satellite link's latency is not a constant.
     kept = shadow_filter(
         _adsc(spark, [("4acb41", T0 - dt.timedelta(seconds=30))]),
-        _adsb(spark, [("4acb41", T0)]), 60)
+        _adsb(spark, [("4acb41", T0)]), 60, 60)
     assert kept.count() == 0
 
 
 def test_another_airframe_does_not_shadow_this_one(spark):
     kept = shadow_filter(
         _adsc(spark, [("4acb41", T0)]),
-        _adsb(spark, [("3c6568", T0)]), 60)
+        _adsb(spark, [("3c6568", T0)]), 60, 60)
     assert kept.count() == 1
 
 
@@ -1062,13 +1113,39 @@ def test_no_adsb_at_all_keeps_everything(spark):
     # The whole point of the merge: an airframe with no reception keeps every
     # ADS-C row it has.
     empty = _adsb(spark, [("x", T0)]).where("icao24 = 'nothing'")
-    kept = shadow_filter(_adsc(spark, [("4acb41", T0)]), empty, 60)
+    kept = shadow_filter(_adsc(spark, [("4acb41", T0)]), empty, 60, 60)
     assert kept.count() == 1
+
+
+def test_the_window_can_be_asymmetric(spark):
+    # The reason the two halves are separate parameters: an airframe whose
+    # ADS-C clock runs 12.9 s slow has its true partner 12.9 s away on one
+    # side only, and a window centred on zero either misses it or has to be
+    # widened on both sides -- which discards ADS-C that is genuinely alone.
+    before_only = shadow_filter(
+        _adsc(spark, [("4acb41", T0 + dt.timedelta(seconds=30))]),
+        _adsb(spark, [("4acb41", T0)]), 60, 5)
+    after_only = shadow_filter(
+        _adsc(spark, [("4acb41", T0 - dt.timedelta(seconds=30))]),
+        _adsb(spark, [("4acb41", T0)]), 5, 60)
+    # ADS-B 30 s *behind* the report: covered by `before`, not by `after`.
+    assert before_only.count() == 0
+    assert after_only.count() == 0
+    # And the mirror image of each is kept.
+    assert shadow_filter(
+        _adsc(spark, [("4acb41", T0 - dt.timedelta(seconds=30))]),
+        _adsb(spark, [("4acb41", T0)]), 60, 5).count() == 1
+
+
+def test_a_half_window_of_zero_is_refused(spark):
+    with pytest.raises(ValueError, match="positive"):
+        shadow_filter(_adsc(spark, [("4acb41", T0)]),
+                      _adsb(spark, [("4acb41", T0)]), 60, 0)
 
 
 def test_output_columns_are_unchanged(spark):
     adsc = _adsc(spark, [("4acb41", T0 + dt.timedelta(seconds=600))])
-    assert shadow_filter(adsc, _adsb(spark, [("4acb41", T0)]), 60).columns \
+    assert shadow_filter(adsc, _adsb(spark, [("4acb41", T0)]), 60, 60).columns \
         == adsc.columns
 
 
@@ -1077,7 +1154,7 @@ def test_duplicate_adsb_rows_do_not_duplicate_the_output(spark):
     # filter into a fan-out.
     adsc = _adsc(spark, [("4acb41", T0 + dt.timedelta(seconds=600))])
     adsb = _adsb(spark, [("4acb41", T0), ("4acb41", T0), ("4acb41", T0)])
-    assert shadow_filter(adsc, adsb, 60).count() == 1
+    assert shadow_filter(adsc, adsb, 60, 60).count() == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1092,9 +1169,18 @@ Append to `src/opdi/ingestion/osn_adsc.py`, and add `"shadow_filter"` to
 
 ```python
 def shadow_filter(
-    adsc: DataFrame, adsb: DataFrame, shadow_seconds: int
+    adsc: DataFrame, adsb: DataFrame, before_seconds: int, after_seconds: int
 ) -> DataFrame:
-    """ADS-C rows with no ADS-B row for the same airframe within the window.
+    """ADS-C rows with no ADS-B row for the same airframe inside the window.
+
+    The window is `[t - before_seconds, t + after_seconds]` around each ADS-C
+    report. **Asymmetric on purpose**: it is defined in a time base the two
+    feeds do not share. Measured against interpolated ADS-B, ADS-C reports sit
+    a median +1.48 s ahead of where ADS-B puts the aircraft at the same
+    timestamp, and the skew is a property of the individual airframe -- one in
+    twenty-five is persistently -12.9 s. A window centred on zero therefore
+    centres on the wrong instant for some aircraft, and the two sides have to
+    be settable independently.
 
     Both frames carry `icao24` and a **timestamp** `event_time`; the returned
     frame has exactly `adsc`'s columns.
@@ -1102,20 +1188,24 @@ def shadow_filter(
     Two stages, because the exact test is a range predicate and a range join
     over a day of state vectors is not affordable:
 
-    1. Bin both sides to `floor(t / shadow_seconds)` and join the ADS-C side's
-       three candidate bins (`b-1`, `b`, `b+1`) against the ADS-B side's. Three
-       bins is what makes the prefilter *complete*: a partner within
-       `shadow_seconds` can only be one bin away.
-    2. Apply the exact `|dt| <= shadow_seconds` test to the survivors, which is
-       a handful of rows per airframe.
+    1. Bin both sides to `floor(t / w)` where `w` is the **larger** half-window,
+       and join the ADS-C side's three candidate bins (`b-1`, `b`, `b+1`)
+       against the ADS-B side's. Three bins is what makes the prefilter
+       *complete*: with a bin at least as wide as either half-window, a partner
+       inside the window can only be one bin away.
+    2. Apply the exact asymmetric test to the survivors, which is a handful of
+       rows per airframe.
 
     The ADS-C side is the broadcast side -- a few thousand rows a day against
     hundreds of millions -- so this is one broadcast hash join, not a shuffle
     of the state vectors.
     """
-    s = int(shadow_seconds)
-    if s <= 0:
-        raise ValueError(f"shadow_seconds must be positive, got {s!r}")
+    before, after = int(before_seconds), int(after_seconds)
+    if before <= 0 or after <= 0:
+        raise ValueError(
+            f"both half-windows must be positive, got before={before!r} "
+            f"after={after!r}")
+    s = max(before, after)
 
     bin_of = lambda t: F.floor(t / F.lit(s)).cast("long")  # noqa: E731
 
@@ -1142,7 +1232,10 @@ def shadow_filter(
             (col("_icao24") == col("icao24")) & (adsb_keys["_bin"] == adsc_keys["_bin"]),
             "inner",
         )
-        .where(F.abs(col("_t_adsb") - col("_t_adsc")) <= F.lit(float(s)))
+        # `t_adsb - t_adsc` in `[-before, +after]`: an ADS-B sample up to
+        # `before` seconds behind the report, or up to `after` ahead of it.
+        .where((col("_t_adsb") - col("_t_adsc")) >= F.lit(-float(before)))
+        .where((col("_t_adsb") - col("_t_adsc")) <= F.lit(float(after)))
         # Distinct before the anti-join: a key set with repeats turns a filter
         # into a fan-out, and an ADS-C row near a dense stretch of ADS-B has
         # dozens of partners.
@@ -1508,7 +1601,9 @@ Add to `TrackProcessor` in `src/opdi/pipeline/tracks.py`, immediately before
             )
 
         df_adsc = self._read_adsc(start_time_str, end_time_str)
-        kept = shadow_filter(df_adsc, df_sv, cfg.shadow_seconds)
+        kept = shadow_filter(df_adsc, df_sv,
+                             cfg.shadow_before_seconds,
+                             cfg.shadow_after_seconds)
 
         # The partition column of the table `process_month` read back. ADS-C
         # rows must carry their own day, not NULL: `process_month` selects
@@ -1708,8 +1803,12 @@ def test_clean_tracks_end_to_end_keeps_the_adsc_rows(spark):
     adsc = out.where("source = 'ADS-C'")
     assert adsc.count() == 2
     assert adsc.where("lat IS NULL OR lon IS NULL").count() == 0
-    # `segment_id` still splits at the 300 s coverage hole, which is what stops
-    # a detector interpolating a ring crossing across ten minutes of silence.
+    # `segment_id` still splits at the 300 s coverage hole. Note what that
+    # does and does not buy: it marks the discontinuity, and no detector reads
+    # it (`grep -rn segment_id src/opdi/pipeline/` finds two comments), so it
+    # does not today prevent an event being interpolated across the boundary.
+    # Asserted because the column is a published contract, not because it
+    # protects anything.
     assert out.select("segment_id").distinct().count() == 3
 ```
 
@@ -2655,6 +2754,531 @@ rule on ADS-C samples during turnarounds, not a footnote in the paper.
 
 ---
 
+## Task 9b: Time-synchronisation measurement
+
+The two feeds do not share a clock, and neither states a usable position age:
+ADS-C's `seen`/`seen_pos` are constant 0 — the feed *asserts* zero age — and the
+readsb record does not expose the ADS-C report's own time-of-position. This task
+measures the skew instead of assuming it away. Named `9b` rather than
+renumbering, following the pipeline's own `01b`/`02a` convention: it belongs
+between the trajectory measurement and the milestone scoring, and its result
+changes how both are read.
+
+A prototype of this measurement has already been run by hand on 2026-06-01
+11:00–14:00 UTC (46 bracketed pairs, 25 airframes) and is the source of every
+number quoted in the spec. This task is that prototype in Spark, over the three
+study days, staged with provenance.
+
+**Files:**
+- Create: `benchmarks/adsc_time_sync.py`
+- Create: `tests/test_adsc_time_sync.py`
+
+**Interfaces:**
+- Consumes: the shared ADS-B input at `s3a://eurocontrol/opdi/research/adsc/input/osn_statevectors_v2` and the ADS-C table beside it (Task 8), both written before either arm ran.
+- Produces:
+  - `bracket(adsc, adsb, max_gap_s) -> DataFrame` — one row per ADS-C report that has an ADS-B sample within `max_gap_s` on **both** sides, carrying the nearest each side.
+  - `decompose(bracketed) -> DataFrame` — adds `along_m`, `cross_m`, `dist_m`, `implied_dt_s`, `adsb_pos_age_s`.
+  - `per_airframe(decomposed) -> DataFrame` — `icao24`, `n`, `median_implied_dt_s`, `std_implied_dt_s`, `median_abs_cross_m`.
+  - CSVs `adsc_time_sync_pairs_2026.csv` and `adsc_time_sync_2026.csv`. Tasks 12 and 13 read both.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_adsc_time_sync.py
+"""The along/cross decomposition, against a track with a known injected lag."""
+
+import datetime as dt
+
+import pytest
+from pyspark.sql import Row
+
+from adsc_time_sync import bracket, decompose, per_airframe
+
+T0 = dt.datetime(2026, 6, 5, 12, 0, 0)
+
+#: Due east at a round speed, at a latitude where a degree of longitude is a
+#: convenient length. Everything below is checked against hand arithmetic, so
+#: the test fails on a wrong projection rather than agreeing with itself.
+LAT = 50.0
+V_MS = 250.0
+R = 6371000.0
+
+
+def _lon_at(seconds):
+    """Longitude after *seconds* of due-east flight at V_MS from lon 0."""
+    import math
+
+    metres = V_MS * seconds
+    return math.degrees(metres / (R * math.cos(math.radians(LAT))))
+
+
+def _adsb(spark, times):
+    return spark.createDataFrame([
+        Row(icao24="4acb41", event_time=T0 + dt.timedelta(seconds=s),
+            lat=LAT, lon=_lon_at(s), velocity=V_MS,
+            last_pos_update=(T0 + dt.timedelta(seconds=s)).timestamp())
+        for s in times])
+
+
+def _adsc(spark, at_seconds, lag_seconds=0.0, cross_m=0.0):
+    """An ADS-C report tagged `at_seconds` whose position is the aircraft's
+    position at `at_seconds + lag_seconds`, offset `cross_m` to the north."""
+    import math
+
+    return spark.createDataFrame([
+        Row(icao24="4acb41",
+            event_time=T0 + dt.timedelta(seconds=at_seconds),
+            lat=LAT + math.degrees(cross_m / R),
+            lon=_lon_at(at_seconds + lag_seconds),
+            velocity=V_MS)])
+
+
+def test_a_synchronised_report_shows_no_offset(spark):
+    out = decompose(bracket(_adsc(spark, 30), _adsb(spark, [0, 60]), 60))
+    r = out.collect()[0]
+    assert r["along_m"] == pytest.approx(0.0, abs=1.0)
+    assert r["cross_m"] == pytest.approx(0.0, abs=1.0)
+    assert r["implied_dt_s"] == pytest.approx(0.0, abs=0.02)
+
+
+def test_a_known_lag_is_recovered(spark):
+    # The whole instrument: a report whose position is 1.5 s further along
+    # than its timestamp claims must read as +1.5 s, and as +375 m along track.
+    out = decompose(bracket(_adsc(spark, 30, lag_seconds=1.5),
+                            _adsb(spark, [0, 60]), 60))
+    r = out.collect()[0]
+    assert r["implied_dt_s"] == pytest.approx(1.5, abs=0.05)
+    assert r["along_m"] == pytest.approx(375.0, abs=5.0)
+    assert r["cross_m"] == pytest.approx(0.0, abs=2.0)
+
+
+def test_a_negative_lag_is_recovered_with_its_sign(spark):
+    out = decompose(bracket(_adsc(spark, 30, lag_seconds=-12.9),
+                            _adsb(spark, [0, 60]), 60))
+    assert out.collect()[0]["implied_dt_s"] == pytest.approx(-12.9, abs=0.1)
+
+
+def test_a_cross_track_error_does_not_read_as_a_lag(spark):
+    # The discriminator the conclusion rests on. A position error is isotropic;
+    # a timing error is purely along track. If a 400 m northward offset leaked
+    # into `implied_dt_s`, the 43:1 ratio would be an artefact of the maths.
+    out = decompose(bracket(_adsc(spark, 30, cross_m=400.0),
+                            _adsb(spark, [0, 60]), 60))
+    r = out.collect()[0]
+    assert r["cross_m"] == pytest.approx(400.0, abs=5.0)
+    assert r["along_m"] == pytest.approx(0.0, abs=5.0)
+    assert r["implied_dt_s"] == pytest.approx(0.0, abs=0.05)
+
+
+def test_an_unbracketed_report_is_dropped(spark):
+    # Only one side: extrapolating is how a measurement invents its own answer.
+    assert bracket(_adsc(spark, 30), _adsb(spark, [0, 10]), 60).count() == 0
+    assert bracket(_adsc(spark, 30), _adsb(spark, [40, 50]), 60).count() == 0
+
+
+def test_a_loose_bracket_is_dropped(spark):
+    # 300 s either side at 250 m/s is 75 km of interpolation: the instrument
+    # would be measuring its own straight line, not the aircraft.
+    assert bracket(_adsc(spark, 300), _adsb(spark, [0, 600]), 60).count() == 0
+
+
+def test_the_nearest_sample_each_side_is_the_one_used(spark):
+    out = decompose(bracket(_adsc(spark, 30),
+                            _adsb(spark, [0, 25, 35, 60]), 60))
+    r = out.collect()[0]
+    assert r["bracket_s"] == pytest.approx(10.0, abs=0.01)
+
+
+def test_another_airframe_cannot_bracket_this_one(spark):
+    other = _adsb(spark, [0, 60]).withColumn(
+        "icao24", __import__("pyspark.sql.functions", fromlist=["lit"]).lit("3c6568"))
+    assert bracket(_adsc(spark, 30), other, 60).count() == 0
+
+
+def test_per_airframe_summarises_each_separately(spark):
+    pairs = decompose(bracket(
+        _adsc(spark, 30, lag_seconds=1.5), _adsb(spark, [0, 60]), 60))
+    summary = per_airframe(pairs).collect()
+    assert len(summary) == 1
+    assert summary[0]["icao24"] == "4acb41"
+    assert summary[0]["n"] == 1
+    assert summary[0]["median_implied_dt_s"] == pytest.approx(1.5, abs=0.05)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `.venv310/bin/python -m pytest tests/test_adsc_time_sync.py -q`
+Expected: FAIL with `ModuleNotFoundError: No module named 'adsc_time_sync'`
+
+- [ ] **Step 3: Write the module**
+
+```python
+#!/usr/bin/env python
+"""How far apart the ADS-B and ADS-C clocks are, measured rather than assumed.
+
+Neither feed states a position age that can be used. ADS-B's `last_pos_update`
+is real but tiny (median 0.22 s, max 0.92 s on the sample measured). ADS-C's
+`seen`/`seen_pos` are constant 0 -- the feed *asserts* zero age for every
+report -- and the readsb `Aircraft` record does not expose the ADS-C report's
+own time-of-position, so there is nothing in band to correct from.
+
+**The instrument.** For each ADS-C report, take the nearest ADS-B sample of the
+same airframe on each side within `max_gap_s`, interpolate the ADS-B position
+linearly to the ADS-C timestamp, and decompose the offset
+`p_adsc - p_adsb` into along-track and cross-track components using the
+direction of the ADS-B pair itself. Then:
+
+* **cross-track** is the position-disagreement floor -- what the two feeds
+  disagree about that no timing explanation can absorb;
+* **along-track / ground speed** is the implied time offset.
+
+A position error is isotropic, so it lands equally in both. A timing error
+lands only along track. The ratio between them is therefore the discriminator,
+and it is what makes the conclusion falsifiable rather than a story:
+`test_a_cross_track_error_does_not_read_as_a_lag` pins the maths down on a
+synthetic track with a known injected offset.
+
+**What the prototype found** (2026-06-01 11:00-14:00 UTC, 46 bracketed pairs,
+25 airframes, full 1 Hz ADS-B): median \\|cross\\| 9 m against median
+\\|along\\| 377 m -- a 43x ratio -- and an implied offset of +1.48 s with an
+IQR of +0.32 to +1.96 s. ADS-B's own staleness cannot explain it (correlation
+0.23, and the age never exceeds 0.92 s). And the offset is **per airframe**:
+within one it holds to sigma 0.10-0.31 s, between them it runs +0.01 s to
++2.09 s, with one airframe persistently at -12.9 s. That is why
+`AdscConfig.time_offset_seconds` ships at zero -- a constant correction would
+be wrong for nearly every aircraft and would damage the synchronised ones.
+
+**Why the sample is small, and why that is not a defect.** The measurement
+needs an airframe heard by *both* feeds at the same minute, and ADS-C exists
+precisely where ADS-B cannot hear the aircraft. 46 of 1,088 reports bracketed
+on the prototype day. More days widen it; nothing widens it a lot.
+
+    python benchmarks/adsc_time_sync.py --days 2026-06-05 2026-06-06 \\
+        2026-06-07 --results-dir /tmp/sync
+"""
+
+import argparse
+import csv
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "benchmarks"))
+
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+
+INPUT_PREFIX = "s3a://eurocontrol/opdi/research/adsc/input"
+
+#: Earth radius for the local tangent-plane projection, metres. The offsets
+#: being measured are hundreds of metres over baselines of tens of kilometres,
+#: so a spherical tangent plane is three orders of magnitude more accurate
+#: than it needs to be and a geodesic solver would be ceremony.
+R_EARTH = 6371000.0
+
+#: Ground speeds below this are not usable: the implied offset divides by
+#: speed, so a taxiing or stationary aircraft turns a 50 m position
+#: disagreement into minutes of apparent skew. ADS-C is a cruise feed, so this
+#: discards almost nothing.
+MIN_SPEED_MS = 50.0
+
+
+def _east_north(lat, lon, lat0, lon0):
+    """Local east/north metres of (lat, lon) relative to (lat0, lon0)."""
+    east = (F.radians(lon - lon0) * F.lit(R_EARTH)
+            * F.cos(F.radians(lat0)))
+    north = F.radians(lat - lat0) * F.lit(R_EARTH)
+    return east, north
+
+
+def bracket(adsc: DataFrame, adsb: DataFrame, max_gap_s: int = 60) -> DataFrame:
+    """ADS-C reports with the nearest ADS-B sample on **each** side.
+
+    Both sides, never one: extrapolating from a single sample would measure the
+    instrument's own straight line rather than the aircraft, and the sign of
+    the result would depend on which side happened to exist.
+
+    The join is the shadow filter's shape -- bin to `max_gap_s`, expand the
+    ADS-C side to three candidate bins, broadcast it, then test exactly -- for
+    the same reason: ADS-C is a few thousand rows a day against hundreds of
+    millions, so this is one broadcast hash join rather than a shuffle of the
+    state vectors. `max(struct(...))` then picks the nearest sample on each
+    side in a single hash aggregate, the idiom
+    `StateVectorIngestion._bucket_decimate` already uses.
+    """
+    w = int(max_gap_s)
+    if w <= 0:
+        raise ValueError(f"max_gap_s must be positive, got {w!r}")
+
+    tc = F.unix_timestamp("event_time").cast("double")
+    bin_c = F.floor(tc / F.lit(w)).cast("long")
+    keys = adsc.select(
+        F.col("icao24"),
+        F.col("event_time").alias("t_c_ts"),
+        tc.alias("t_c"),
+        F.col("lat").alias("lat_c"),
+        F.col("lon").alias("lon_c"),
+        F.explode(F.array(bin_c - 1, bin_c, bin_c + 1)).alias("_bin"),
+    )
+
+    tb = F.unix_timestamp("event_time").cast("double")
+    samples = adsb.select(
+        F.col("icao24").alias("_icao24"),
+        tb.alias("t_b"),
+        F.col("lat").alias("lat_b"),
+        F.col("lon").alias("lon_b"),
+        F.col("velocity").alias("v_b"),
+        F.col("last_pos_update").cast("double").alias("lpu_b"),
+        F.floor(tb / F.lit(w)).cast("long").alias("_bin"),
+    ).where(F.col("lat_b").isNotNull() & F.col("lon_b").isNotNull())
+
+    j = (
+        samples.join(
+            F.broadcast(keys),
+            (F.col("_icao24") == F.col("icao24"))
+            & (samples["_bin"] == keys["_bin"]),
+            "inner",
+        )
+        .withColumn("_dt", F.col("t_b") - F.col("t_c"))
+        .where(F.abs(F.col("_dt")) <= F.lit(float(w)))
+    )
+
+    # `max` over a struct compares field by field, so leading with the signed
+    # gap picks the nearest sample on each side: the largest negative gap
+    # before, the smallest positive gap after.
+    before = F.max(F.when(F.col("_dt") <= 0, F.struct(
+        F.col("_dt").alias("dt"), F.col("t_b"), F.col("lat_b"),
+        F.col("lon_b"), F.col("v_b"), F.col("lpu_b"))))
+    after = F.min(F.when(F.col("_dt") >= 0, F.struct(
+        F.col("_dt").alias("dt"), F.col("t_b"), F.col("lat_b"),
+        F.col("lon_b"), F.col("v_b"), F.col("lpu_b"))))
+
+    out = (
+        j.groupBy("icao24", "t_c_ts", "t_c", "lat_c", "lon_c")
+        .agg(before.alias("_p"), after.alias("_n"))
+        # A report with only one side is dropped here rather than filled: see
+        # the docstring. `max`/`min` of an all-NULL group is NULL, so this is
+        # the whole test.
+        .where(F.col("_p").isNotNull() & F.col("_n").isNotNull())
+        .select(
+            "icao24", "t_c_ts", "t_c", "lat_c", "lon_c",
+            F.col("_p.t_b").alias("t_prev"), F.col("_p.lat_b").alias("lat_prev"),
+            F.col("_p.lon_b").alias("lon_prev"), F.col("_p.v_b").alias("v_prev"),
+            F.col("_p.lpu_b").alias("lpu_prev"),
+            F.col("_n.t_b").alias("t_next"), F.col("_n.lat_b").alias("lat_next"),
+            F.col("_n.lon_b").alias("lon_next"), F.col("_n.v_b").alias("v_next"),
+        )
+        .withColumn("bracket_s", F.col("t_next") - F.col("t_prev"))
+    )
+    # A zero-length bracket cannot be interpolated and a long one interpolates
+    # across more than the instrument can justify: at 250 m/s a 120 s bracket
+    # is 30 km of assumed straight line, against the hundreds of metres being
+    # measured.
+    return out.where((F.col("bracket_s") > 0)
+                     & (F.col("bracket_s") <= F.lit(2.0 * w)))
+
+
+def decompose(bracketed: DataFrame) -> DataFrame:
+    """Add the along/cross decomposition and the implied time offset."""
+    w = ((F.col("t_c") - F.col("t_prev"))
+         / (F.col("t_next") - F.col("t_prev")))
+    lat_i = F.col("lat_prev") + w * (F.col("lat_next") - F.col("lat_prev"))
+    lon_i = F.col("lon_prev") + w * (F.col("lon_next") - F.col("lon_prev"))
+
+    df = (bracketed
+          .withColumn("_w", w)
+          .withColumn("lat_i", lat_i)
+          .withColumn("lon_i", lon_i))
+
+    # Track direction from the ADS-B pair itself, not from the broadcast
+    # `heading`: heading is what the aircraft says it is pointing at, which in
+    # wind is not where it is going, and the decomposition needs the direction
+    # it actually moved.
+    dx, dy = _east_north(F.col("lat_next"), F.col("lon_next"),
+                         F.col("lat_prev"), F.col("lon_prev"))
+    df = df.withColumn("_dx", dx).withColumn("_dy", dy)
+    norm = F.sqrt(F.col("_dx") * F.col("_dx") + F.col("_dy") * F.col("_dy"))
+    df = df.withColumn("_norm", norm).where(F.col("_norm") > F.lit(1.0))
+    df = (df.withColumn("_ux", F.col("_dx") / F.col("_norm"))
+            .withColumn("_uy", F.col("_dy") / F.col("_norm")))
+
+    ox, oy = _east_north(F.col("lat_c"), F.col("lon_c"),
+                         F.col("lat_i"), F.col("lon_i"))
+    df = df.withColumn("_ox", ox).withColumn("_oy", oy)
+
+    df = (
+        df.withColumn("along_m",
+                      F.col("_ox") * F.col("_ux") + F.col("_oy") * F.col("_uy"))
+        .withColumn("cross_m",
+                    -F.col("_ox") * F.col("_uy") + F.col("_oy") * F.col("_ux"))
+        .withColumn("dist_m", F.sqrt(F.col("_ox") * F.col("_ox")
+                                     + F.col("_oy") * F.col("_oy")))
+        .withColumn("v_ms", (F.col("v_prev") + F.col("v_next")) / F.lit(2.0))
+        # ADS-B's own position age at the bracketing sample. Reported because
+        # the archive carries positions forward, which would bias the result
+        # in exactly the direction measured -- so the alternative explanation
+        # has to be checkable from the output rather than argued away.
+        .withColumn("adsb_pos_age_s", F.col("t_prev") - F.col("lpu_prev"))
+        .where(F.col("v_ms") >= F.lit(MIN_SPEED_MS))
+        .withColumn("implied_dt_s", F.col("along_m") / F.col("v_ms"))
+    )
+
+    return df.select("icao24", F.col("t_c_ts").alias("event_time"),
+                     "along_m", "cross_m", "dist_m", "implied_dt_s",
+                     "v_ms", "bracket_s", "adsb_pos_age_s")
+
+
+def per_airframe(decomposed: DataFrame) -> DataFrame:
+    """Per-airframe summary -- the table the per-airframe conclusion rests on.
+
+    Reported per airframe and not only in aggregate because that is where the
+    finding is: the network median says +1.48 s, and an airframe-level view
+    says one aircraft is at +0.01 s and another at -12.9 s. A single number
+    would have hidden the only thing that decides whether a correction is
+    possible.
+    """
+    return (decomposed.groupBy("icao24").agg(
+        F.count(F.lit(1)).alias("n"),
+        F.expr("percentile_approx(implied_dt_s, 0.5)").alias("median_implied_dt_s"),
+        F.stddev("implied_dt_s").alias("std_implied_dt_s"),
+        F.expr("percentile_approx(abs(cross_m), 0.5)").alias("median_abs_cross_m"),
+        F.expr("percentile_approx(abs(along_m), 0.5)").alias("median_abs_along_m"),
+    ).orderBy("icao24"))
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--days", nargs="+", required=True)
+    ap.add_argument("--prefix", default=INPUT_PREFIX)
+    ap.add_argument("--max-gap-s", type=int, default=60)
+    ap.add_argument("--results-dir", required=True)
+    ap.add_argument("--pairs-name", default="adsc_time_sync_pairs_2026.csv")
+    ap.add_argument("--out-name", default="adsc_time_sync_2026.csv")
+    ap.add_argument("--cores", type=int, default=4)
+    ap.add_argument("--driver-memory", default="8g")
+    ap.add_argument("--executors", type=int, default=8)
+    args = ap.parse_args()
+
+    import osn_sample
+    from osn_sample import build_spark, load_dotenv
+
+    load_dotenv()
+    osn_sample.RESEARCH_EXECUTORS = args.executors
+    spark = build_spark(args.cores, args.driver_memory, distributed=True)
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+
+    days = F.array(*[F.lit(d) for d in args.days])
+    try:
+        adsc = (spark.read.parquet(f"{args.prefix}/osn_adsc_statevectors")
+                .where(F.array_contains(days, F.col("event_time_day").cast("string"))))
+        adsb = (spark.read.parquet(f"{args.prefix}/osn_statevectors_v2")
+                .where(F.array_contains(days, F.col("event_time_day").cast("string"))))
+        n_adsc = adsc.count()
+        pairs = decompose(bracket(adsc, adsb, args.max_gap_s)).cache()
+        pair_rows = [r.asDict() for r in pairs.collect()]
+        print(f"bracketed {len(pair_rows)} of {n_adsc} ADS-C reports "
+              f"({len({r['icao24'] for r in pair_rows})} airframes)")
+        summary = [r.asDict() for r in per_airframe(pairs).collect()]
+        overall = pairs.agg(
+            F.count(F.lit(1)).alias("n"),
+            F.expr("percentile_approx(implied_dt_s, 0.5)").alias("median_implied_dt_s"),
+            F.stddev("implied_dt_s").alias("std_implied_dt_s"),
+            F.expr("percentile_approx(abs(cross_m), 0.5)").alias("median_abs_cross_m"),
+            F.expr("percentile_approx(abs(along_m), 0.5)").alias("median_abs_along_m"),
+        ).collect()[0].asDict()
+        overall["icao24"] = "ALL"
+        summary.append(overall)
+    finally:
+        spark.stop()
+
+    out = Path(args.results_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    def write(name, rows, required):
+        if not rows and required:
+            raise SystemExit(
+                f"{name}: no bracketed pairs at all. That is not a null "
+                f"result -- it means the two tables share no airframe-minute, "
+                f"so either the ADS-C ingest or the state-vector window is "
+                f"wrong for these days.")
+        fields = sorted({k for r in rows for k in r}) or ["icao24"]
+        with open(out / name, "w", newline="") as fh:
+            w = csv.DictWriter(fh, fieldnames=fields)
+            w.writeheader()
+            w.writerows(rows)
+        print(f"  wrote {out / name} ({len(rows)} rows)")
+
+    write(args.pairs_name, pair_rows, required=True)
+    write(args.out_name, summary, required=True)
+
+    import provenance
+    for name in (args.pairs_name, args.out_name):
+        provenance.record(
+            out, name, "benchmarks/adsc_time_sync.py", sys.argv[1:],
+            ["benchmarks/adsc_time_sync.py", "src/opdi/ingestion/osn_adsc.py"],
+            inputs={"days": args.days, "max_gap_s": args.max_gap_s,
+                    "min_speed_ms": MIN_SPEED_MS},
+            input_tables=[f"{args.prefix}/osn_adsc_statevectors",
+                          f"{args.prefix}/osn_statevectors_v2"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+```
+
+- [ ] **Step 4: Run the tests**
+
+Run: `.venv310/bin/python -m pytest tests/test_adsc_time_sync.py -q`
+Expected: PASS (9 tests). The two that matter most are
+`test_a_known_lag_is_recovered` and
+`test_a_cross_track_error_does_not_read_as_a_lag` — together they prove the
+instrument separates timing from position rather than assuming the answer.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add benchmarks/adsc_time_sync.py tests/test_adsc_time_sync.py
+git commit -m "feat(adsc): measure the ADS-B/ADS-C clock skew along and across track"
+```
+
+- [ ] **Step 6: Run it against the shared inputs**
+
+Needs only Task 8's Step 6 (the shared ingest), not the arm builds:
+```bash
+export PYSPARK_DRIVER_PYTHON=$PWD/.venv310/bin/python
+unset PYSPARK_PYTHON OPDI_WAREHOUSE
+.venv310/bin/python -u benchmarks/adsc_time_sync.py \
+  --days 2026-06-05 2026-06-06 2026-06-07 \
+  --results-dir benchmarks/out/adsc_sync
+```
+
+Expected, from the prototype: a few tens of bracketed pairs per day, median
+`|cross_m|` around ten metres, median `|along_m|` in the hundreds, and a
+per-airframe table whose within-airframe `std_implied_dt_s` is far smaller than
+the spread of `median_implied_dt_s` between airframes.
+
+**Three readings that change what follows:**
+
+- **Median `|cross_m|` comparable to median `|along_m|`** — the offset is a
+  position error after all, the 43× ratio was a sampling artefact, and the
+  timing story in the spec must be withdrawn rather than reworded.
+- **`adsb_pos_age_s` large and correlated with `implied_dt_s`** — the offset is
+  ADS-B carry-forward, not ADS-C skew. Check the correlation explicitly; the
+  prototype measured 0.23 with ages never above 0.92 s.
+- **`std_implied_dt_s` as large as the between-airframe spread** — the skew is
+  not a per-airframe property, and a single global
+  `time_offset_seconds` becomes defensible after all. That would be a reason to
+  add a corrected third arm, which is what the knob exists for.
+
+```bash
+git add benchmarks/out/adsc_sync
+git commit -m "data(adsc): clock-skew measurement over the three study days"
+```
+
+---
+
 ## Task 10: Score both arms against APDF
 
 Reuses `events_gt` for the truth and `events_score` for the arithmetic — the
@@ -3243,7 +3867,7 @@ git commit --allow-empty -m "run(adsc): merged-arm benchmarker cache built for 2
 - Create: `opdi/tests/test_regenerate_adsc_v1.py`
 
 **Interfaces:**
-- Consumes: `adsc_census.py` (Task 1), `adsc_coverage_gain.py` (Task 9), `adsc_events_compare.py` (Task 10), `provenance`.
+- Consumes: `adsc_census.py` (Task 1), `adsc_coverage_gain.py` (Task 9), `adsc_time_sync.py` (Task 9b), `adsc_events_compare.py` (Task 10), `provenance`.
 - Produces: `jobs() -> list[Job]`, `PAPER`, `DATA`, `main()` with `--check` / `--force` / `--only` / `--allow-stale`. Task 13's `.qmd` invokes it.
 
 - [ ] **Step 1: Write the failing test**
@@ -3361,6 +3985,11 @@ question has to be answered:
     samples and track-hours added, reception holes closed, and the
     merge-neutrality guard (tracks holding two real callsigns, i.e. two flights
     fused).
+  * ``time_sync_2026`` -- how far apart the two clocks are. For each ADS-C
+    report bracketed by ADS-B within 60 s, the offset is decomposed into
+    along-track and cross-track; cross-track is the position floor and
+    along-track over ground speed is the implied time offset. Reported per
+    airframe, because that is where the finding is.
   * ``events_2026`` -- what it did to the milestones, both arms scored against
     APDF 202606 over the twenty flight-events-v4 study aerodromes, per
     milestone and per aerodrome.
@@ -3376,7 +4005,7 @@ current. If a job below reports table contents that disagree with the paper,
 rebuild the arms first.
 
 **What this module does not measure.** Nothing is scored outside the European
-box or outside June 2026, and no sweep of ``shadow_seconds`` was run. Both are
+box or outside June 2026, and no sweep of the shadow half-windows was run. Both are
 stated in the paper's limitations chapter rather than implied by their absence.
 """
 ```
@@ -3442,6 +4071,21 @@ def jobs() -> list:
                   "research/adsc/{base,merged}, built by run_adsc_day.py.",
         ),
         Job(
+            name="time_sync_2026",
+            script="benchmarks/adsc_time_sync.py",
+            args=["--days", *DAYS,
+                  "--pairs-name", "adsc_time_sync_pairs_2026.csv",
+                  "--out-name", "adsc_time_sync_2026.csv"],
+            outputs={"adsc_time_sync_pairs_2026.csv":
+                         "adsc_time_sync_pairs_2026.csv",
+                     "adsc_time_sync_2026.csv": "adsc_time_sync_2026.csv"},
+            code_paths=CORE,
+            notes="Along/cross decomposition of each ADS-C report against "
+                  "ADS-B interpolated to the same instant, per airframe. "
+                  "Reads the shared inputs at research/adsc/input, so it does "
+                  "not depend on either arm having been built.",
+        ),
+        Job(
             name="events_2026",
             script="benchmarks/adsc_events_compare.py",
             args=["--out-name", "adsc_events_2026.csv",
@@ -3473,7 +4117,7 @@ Expected: PASS (7 tests)
 - [ ] **Step 5: Check staleness reporting works with no data staged**
 
 Run: `.venv310/bin/python benchmarks/regenerate_adsc_v1.py --check --allow-stale`
-Expected: three `STALE` lines naming the five missing CSVs, exit 0.
+Expected: four `STALE` lines naming the seven missing CSVs, exit 0.
 
 - [ ] **Step 6: Commit**
 
@@ -3491,10 +4135,10 @@ mkdir -p ../opdi-portal/papers/adsc-fusion-v1/data
 .venv310/bin/python -u benchmarks/regenerate_adsc_v1.py
 ```
 
-Expected: three jobs run, five CSVs staged under
+Expected: four jobs run, seven CSVs staged under
 `../opdi-portal/papers/adsc-fusion-v1/data/`, each with a `_manifest.json`
 entry naming the script, argv, git SHA and dirty flag. Re-running must then
-report all three `current` and do nothing.
+report all four `current` and do nothing.
 
 ---
 
@@ -3621,6 +4265,8 @@ D <- function(f) {
 census <- D("adsc_census.csv")                      # one row per sampled day
 gain   <- D("adsc_gain_2026.csv")                   # one row per arm + extension
 holes  <- D("adsc_holes_2026.csv")                  # one row per bridged hole
+sync   <- D("adsc_time_sync_2026.csv")              # one row per airframe + ALL
+syncp  <- D("adsc_time_sync_pairs_2026.csv")        # one row per bracketed pair
 ev     <- D("adsc_events_2026.csv")                 # one row per (arm, milestone)
 evap   <- D("adsc_events_by_airport_2026.csv")      # + per aerodrome
 
@@ -3646,6 +4292,11 @@ CEN <- function(day, col) {
   if (length(v) != 1) stop("no single census row for ", day, "/", col)
   v
 }
+SYNC <- function(icao24, col) {
+  v <- sync[sync$icao24 == icao24, col]
+  if (length(v) != 1) stop("no single time-sync row for ", icao24, "/", col)
+  v
+}
 EV <- function(arm, milestone, col) {
   v <- ev[ev$arm == arm & ev$milestone == milestone, col]
   if (length(v) != 1) stop("no single event row for ", arm, "/", milestone)
@@ -3659,10 +4310,12 @@ signed <- function(x) sprintf("%+.1f", x)
 
 # Configuration, not measurement. Named here so the prose and the parameter
 # table read one source -- `AdscConfig` in `src/opdi/config.py`.
-SHADOW_SECONDS <- 60
-HOLE_SECONDS   <- 300
-ISOLATED_GAP_S <- 20
-STUDY_DAYS     <- c("2026-06-05", "2026-06-06", "2026-06-07")
+SHADOW_BEFORE_S <- 60
+SHADOW_AFTER_S  <- 60
+TIME_OFFSET_S   <- 0.0
+HOLE_SECONDS    <- 300
+ISOLATED_GAP_S  <- 20
+STUDY_DAYS      <- c("2026-06-05", "2026-06-06", "2026-06-07")
 ```
 ````
 
@@ -3741,7 +4394,8 @@ Append:
 | Merge point | Before segmentation | `TrackProcessor._merge_adsc` |
 | Default | Off (`adsc.enabled = False`) | `AdscConfig` |
 | ADS-C callsign | `NULL` | `osn_adsc.to_opdi_schema` |
-| Shadow window | `r SHADOW_SECONDS` s | `AdscConfig.shadow_seconds` |
+| Shadow window | −`r SHADOW_BEFORE_S` s … +`r SHADOW_AFTER_S` s | `AdscConfig.shadow_{before,after}_seconds` |
+| Global time correction | `r TIME_OFFSET_S` s (off) | `AdscConfig.time_offset_seconds` |
 | Thinning applied to ADS-C | None | `AdscIngestion.ingest_from_s3` |
 | Isolated-point rule | Exempt for ADS-C | `CleaningConfig.sparse_sources` |
 | Stale-broadcast rule | Exempt for ADS-C | `CleaningConfig.sparse_sources` |
@@ -3852,7 +4506,130 @@ Write the prose from those three tables. It must answer, in order:
    any ADS-C at all.
 ````
 
-- [ ] **Step 5: Write the flight-events chapter**
+- [ ] **Step 5b: Write the time-synchronisation chapter**
+
+Append, **before** the flight-events chapter — the milestone result cannot be
+read without it:
+
+````markdown
+# Whether the two clocks agree
+
+ADS-B and ADS-C arrive over different links and neither states a position age
+that can be used. ADS-B's `last_pos_update` is real but small. ADS-C's `seen`
+and `seen_pos` are constant zero — the feed *asserts* that every report is
+current — and the readsb record does not expose the ADS-C report's own
+time-of-position, so there is nothing in band to correct from. The skew was
+therefore measured.
+
+For each ADS-C report with an ADS-B sample of the same airframe within
+`r MAX_GAP_S` s on **both** sides, the ADS-B position is interpolated to the
+ADS-C timestamp and the offset decomposed against the direction the ADS-B pair
+actually moved. **Cross-track** is what the two feeds disagree about that no
+timing explanation can absorb; **along-track divided by ground speed** is the
+implied time offset. A position error is isotropic and lands in both; a timing
+error lands only along track.
+
+```{r sync-overall}
+#| echo: false
+if (is.null(sync)) {
+  cat(missing_note("adsc_time_sync_2026.csv"))
+} else {
+  a <- sync[sync$icao24 == "ALL", ]
+  kable(data.frame(
+    quantity = c("Bracketed pairs", "Median |cross-track|",
+                 "Median |along-track|", "Along:cross ratio",
+                 "Median implied offset", "sigma of implied offset"),
+    value = c(num(a$n), paste0(p1(a$median_abs_cross_m), " m"),
+              paste0(p1(a$median_abs_along_m), " m"),
+              paste0(p1(a$median_abs_along_m /
+                          max(a$median_abs_cross_m, 1e-9)), "x"),
+              paste0(signed(a$median_implied_dt_s), " s"),
+              paste0(p1(a$std_implied_dt_s), " s"))),
+    row.names = FALSE, col.names = c("", "Measured"),
+    caption = paste("ADS-C against interpolated ADS-B over",
+                    paste(STUDY_DAYS, collapse = ", "), "."))
+}
+```
+
+```{r sync-alternative}
+#| echo: false
+if (is.null(syncp)) {
+  cat(missing_note("adsc_time_sync_pairs_2026.csv"))
+} else {
+  # The alternative explanation, checkable rather than argued away: the OSN
+  # archive carries positions forward, which would bias the result in exactly
+  # the direction measured.
+  ok <- !is.na(syncp$adsb_pos_age_s) & !is.na(syncp$implied_dt_s)
+  kable(data.frame(
+    quantity = c("Median ADS-B position age", "Max ADS-B position age",
+                 "corr(implied offset, ADS-B position age)"),
+    value = c(paste0(p1(median(syncp$adsb_pos_age_s[ok])), " s"),
+              paste0(p1(max(syncp$adsb_pos_age_s[ok])), " s"),
+              sprintf("%.2f", cor(syncp$implied_dt_s[ok],
+                                  syncp$adsb_pos_age_s[ok])))),
+    row.names = FALSE, col.names = c("", "Measured"),
+    caption = paste("Could the offset be ADS-B's own staleness rather than",
+                    "ADS-C's skew? The archive carries positions forward, so",
+                    "the question has to be answered from the data."))
+}
+```
+
+```{r sync-per-airframe}
+#| echo: false
+if (is.null(sync)) {
+  cat(missing_note("adsc_time_sync_2026.csv"))
+} else {
+  pa <- sync[sync$icao24 != "ALL", ]
+  pa <- pa[order(pa$median_implied_dt_s), ]
+  kable(pa[, c("icao24", "n", "median_implied_dt_s", "std_implied_dt_s",
+               "median_abs_cross_m")],
+        row.names = FALSE, digits = 2,
+        col.names = c("Airframe", "Pairs", "Median implied offset (s)",
+                      "sigma (s)", "Median |cross| (m)"),
+        caption = paste("Per airframe. The question this table decides:",
+                        "is the skew a property of the feed, which one",
+                        "constant could correct, or of the individual",
+                        "aircraft, which it could not?"))
+}
+```
+
+Write the prose of this chapter from those three tables. It must settle four
+things, in order, and each conclusion must be refutable by a number on the page:
+
+1. **Is it timing or position?** The along-to-cross ratio. State that a
+   position error is isotropic, so a large ratio cannot be one.
+2. **Is it ADS-B's carry-forward?** The position-age table. The prototype
+   measured a median age of 0.22 s, a maximum of 0.92 s and a correlation of
+   0.23 — too small to explain an offset of a few hundred metres.
+3. **Is it one number or many?** Compare within-airframe sigma against the
+   spread of per-airframe medians. The prototype found sigma 0.10–0.31 s within
+   airframes against a +0.01 s to +2.09 s spread between them, plus one
+   airframe persistently at −12.9 s. If that holds, say plainly that
+   `time_offset_seconds` ships at zero **because** a constant would damage the
+   aircraft that are already synchronised, and that a per-airframe correction
+   is the real fix and is not attempted here.
+4. **Does it matter?** Convert the offset to metres at cruise speed, and
+   compare it against the alternative — a straight line interpolated across a
+   ten-minute reception hole, whose own error is tens of kilometres. Say which
+   is larger. If the skew is small against the alternative, the honest
+   conclusion is that it is a correction worth reporting and not a reason to
+   withhold the merge; say so in those words rather than leaving the reader to
+   infer it.
+
+Also state what the skew does **not** reach: the derivative-spike filter.
+`latlon_d1_max_deg_s` is 0.01 deg/s, about 1,100 m/s of apparent ground speed;
+a few hundred metres of displacement across a 600 s gap is three orders of
+magnitude below that. The filter cannot see this error, so it neither corrects
+it nor is damaged by it — which is also why no source guard was added to it.
+````
+
+Add to the `setup` chunk, beside the other configuration constants:
+
+```r
+MAX_GAP_S <- 60   # adsc_time_sync.py --max-gap-s
+```
+
+- [ ] **Step 5c: Write the flight-events chapter**
 
 Append:
 
@@ -3913,6 +4690,11 @@ Write the prose from those two tables. It must state:
 3. Where a change was physically possible — `first_seen`, `last_seen`, the FL
    crossings, and ADEP/ADES through the flight list — and what the tables show
    there.
+3b. For any event that *did* move, whether it could have been interpolated
+   across an ADS-B/ADS-C pair, and therefore whether it inherits the clock
+   offset from the previous chapter. Nothing in the pipeline prevents that
+   interpolation (`segment_id` is read by no detector), so a moved event is not
+   automatically a better event.
 4. If nothing moved anywhere: say that the hypothesis as stated is **not
    supported for this period and this coverage box**, and distinguish that
    from "ADS-C is useless" — the trajectory chapter's hole count is the
@@ -3933,9 +4715,21 @@ Each of these is a measurement that was not made, not a result:
   arm would see far more of it, and APDF could not score it.
 - **Only June 2026, three days.** The flight-events-v4 period, chosen for
   comparability. ADS-C volumes in 2023–2024 are not scored.
-- **No `shadow_seconds` sweep.** `r SHADOW_SECONDS` s is a reasoned default,
-  not a tuned one. A wider window drops more ADS-C; a narrower one admits
-  near-duplicate positions.
+- **No shadow-window sweep.** −`r SHADOW_BEFORE_S`/+`r SHADOW_AFTER_S` s is a
+  reasoned default, not a tuned one. A wider window drops more ADS-C; a
+  narrower one admits near-duplicate positions.
+- **No per-airframe time correction, and no stability study of the skew.**
+  The time-synchronisation chapter measures the offset on one day and 25
+  airframes. Whether an airframe's offset is stable across days -- the
+  precondition for correcting it -- is not measured here.
+- **Nothing stops an event being interpolated across a source boundary.**
+  `segment_id` splits at 300 s coverage holes and is read by no detector
+  (`grep -rn segment_id src/opdi/pipeline/` finds two comments). An event
+  derived between an ADS-B and an ADS-C sample therefore inherits the
+  along-track displacement. This is pre-existing -- the same detectors
+  already interpolate across 30-minute ADS-B holes -- and making
+  `segment_id` load-bearing would change published detector behaviour, so
+  it is named here as a follow-up rather than changed on this branch.
 - **No IATA→ICAO callsign recovery.** The feed's `flight` field is discarded
   rather than mapped, so ADS-C contributes no callsign evidence to segmentation
   or to the flight list.
@@ -3992,13 +4786,14 @@ if (!file.exists(mf)) {
 ```{r provenance-missing}
 #| echo: false
 expected <- c("adsc_census.csv", "adsc_gain_2026.csv", "adsc_holes_2026.csv",
+              "adsc_time_sync_2026.csv", "adsc_time_sync_pairs_2026.csv",
               "adsc_events_2026.csv", "adsc_events_by_airport_2026.csv")
 absent <- expected[!file.exists(file.path("data", expected))]
 if (length(absent)) {
   cat(paste0("**Not staged:** `", paste(absent, collapse = "`, `"), "`. ",
              "The chapters above say so in place; this list is the index."))
 } else {
-  cat("All five expected outputs are staged.")
+  cat("All seven expected outputs are staged.")
 }
 ```
 ````
@@ -4048,6 +4843,14 @@ box, 97.6% of them above FL300, three quarters west of 10°W, no `on_ground`
 flag, and every speed, temperature, wind and selected-altitude field empty on
 every day sampled. The A-CDM runway family therefore cannot move, and that null
 is reported as measured rather than omitted.
+
+Also measures what the two feeds disagree about. They agree on where the track
+is to within about nine metres across track and disagree by hundreds of metres
+along it — a timing offset, not a position error — and that offset is a
+property of the individual airframe, not of the feed. One aircraft in
+twenty-five is persistently about thirteen seconds out while another is
+synchronised to a hundredth of a second, which is why no global correction is
+applied.
 :::
 ::::
 ```
@@ -4076,7 +4879,15 @@ after the track-identity one:
   ADS-C value (20 s rule, 600 s cadence). The `source` column exists **only**
   in a run with the flag on — a column present in new partitions of a
   production table and absent from old ones breaks `spark.read.parquet` schema
-  inference silently. See `opdi-portal/papers/adsc-fusion-v1/`.
+  inference silently. **The two feeds do not share a clock:** measured against
+  ADS-B interpolated to the same instant, ADS-C reports sit a median +1.48 s
+  ahead along track (9 m cross-track against 377 m along-track, a 43x ratio, so
+  it is timing and not position), and the offset is a property of the
+  *individual airframe* -- tight within one (sigma 0.10-0.31 s), spread +0.01 s
+  to +2.09 s between them, with one airframe persistently at -12.9 s. So
+  `time_offset_seconds` ships at 0.0: a constant would damage the aircraft
+  already synchronised. `benchmarks/adsc_time_sync.py` is the instrument. See
+  `opdi-portal/papers/adsc-fusion-v1/`.
 ```
 
 - [ ] **Step 10: Commit, submodule-first**
@@ -4104,6 +4915,18 @@ task: arm isolation → 8; merge point → 6; default off → 2, 6; schema → 3
 (`opdi`), 11 (`opdi-benchmarker`) and 12–13 (`opdi-portal`). Every non-goal is
 restated in the paper's limitations chapter (Task 13, Step 6).
 
+**Time synchronisation.** Every row of the spec's "Time synchronisation —
+measured" decision table maps to a task: measure it → 9b; no global correction
+→ 2 (`time_offset_seconds = 0.0`, with a test) and 3 (applied in the ingest, a
+no-op at zero); asymmetric shadow window → 2 and 4; derivative filter
+unchanged → asserted nowhere, because nothing was changed, and argued in Task
+9b's module docstring and the paper's sync chapter; per-airframe correction out
+of scope → the paper's limitations; `last_pos_update` as an assertion → Task 3's
+docstring and Task 9b's `adsb_pos_age_s` column, which is what makes the
+alternative explanation checkable. Task 7's `segment_id` test comment was
+corrected: it marks the discontinuity and protects nothing, because no detector
+reads it.
+
 **Known gap, stated rather than hidden.** The spec's "measure first, then
 decide" instinct is honoured only for the extras struct (Task 1, Step 8 is an
 explicit stop-and-report gate). Everything else is built before any cluster
@@ -4116,7 +4939,7 @@ spends six cluster-hours.
 everywhere: `ADSB_SOURCE`/`ADSC_SOURCE` (Task 3) are the only spellings, read
 by `CleaningConfig.sparse_sources` (Task 2), `_sparse_mask` (Task 7),
 `arm_summary`/`bridged_holes` (Task 9), `DEFAULT_SOURCE` and `SOURCE_STYLE`
-(Task 11). `shadow_filter(adsc, adsb, shadow_seconds)` takes **timestamp**
+(Task 11). `shadow_filter(adsc, adsb, before_seconds, after_seconds)` takes **timestamp**
 `event_time` on both sides and is called only from `_merge_adsc`, after the
 cast — `to_opdi_schema` hands back a double and `ingest_from_s3` casts before
 writing, so the table the merge reads is already a timestamp. `arm_path(arm,

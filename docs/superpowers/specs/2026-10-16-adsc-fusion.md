@@ -64,6 +64,89 @@ ADS-C; 2026-05-18 onward only, 374 files/day) and is **out of scope**.
    `event_time % 5 == 0`; ADS-C timestamps are arbitrary doubles, so the modulo
    arm would delete almost all of it. ADS-C is ingested unthinned.
 
+## Time synchronisation — measured
+
+The two feeds carry different clocks and neither states a position age that can
+be trusted: ADS-C's `seen`/`seen_pos` are constant 0, i.e. the feed *asserts*
+zero age for every report, and the readsb `Aircraft` record does not expose the
+ADS-C report's own time-of-position. So the skew was measured instead, by
+comparing ADS-C reports against ADS-B interpolated to the same instant.
+
+**Method.** For each ADS-C report, take the two ADS-B samples of the same
+`icao24` bracketing it within 60 s, interpolate position linearly to the ADS-C
+timestamp, and decompose the offset `p_adsc − p_adsb` into **along-track** and
+**cross-track** components using the direction of the ADS-B pair itself.
+Cross-track is the position-disagreement floor; along-track divided by ground
+speed is the implied time offset. Measured on 2026-06-01, 11:00–14:00 UTC, full
+1 Hz ADS-B (all seven row groups per hour): **46 bracketed pairs, 25 airframes**
+out of 1,088 ADS-C reports — the overlap is intrinsically small because ADS-C
+reports mostly arrive where ADS-B cannot hear the aircraft.
+
+| Quantity | Value |
+|---|---|
+| Median \|cross-track\| | **9 m** |
+| Median \|along-track\| | **377 m** |
+| Along:cross ratio | **43×** |
+| Implied offset, median | **+1.48 s** |
+| Implied offset, IQR | +0.32 … +1.96 s |
+| Implied offset, σ (core) | 0.86 s |
+| ADS-B's own position age (`time − lastPosUpdate`) | median 0.22 s, max 0.92 s |
+| corr(implied offset, ADS-B position age) | 0.23 |
+
+**Three conclusions, each load-bearing.**
+
+1. **The residual is timing, not position.** A 43× along-to-cross ratio cannot
+   be a position error, which would be isotropic. The two feeds agree about
+   *where the track is* to within about nine metres.
+2. **It is not ADS-B staleness.** The OSN archive carries positions forward,
+   which would bias exactly this way — but `time − lastPosUpdate` is at most
+   0.92 s and correlates with the offset at only 0.23. The displacement is on
+   the ADS-C side.
+3. **The skew is per-airframe, not global.** Within an airframe the implied
+   offset is tight (σ 0.10–0.31 s over 2–6 reports); between airframes it
+   ranges from 0.01 s to +2.09 s, with one airframe (`345318`) persistently at
+   **−12.9 s** across three reports. So a single global correction is wrong for
+   nearly every aircraft and would make the well-synchronised ones worse.
+
+| Airframe | Reports | Median implied offset | σ |
+|---|---|---|---|
+| `47c968` | 6 | +0.01 s | 0.10 |
+| `06a0b5` | 3 | +0.24 s | 0.11 |
+| `461f59` | 3 | +1.19 s | 0.25 |
+| `3c6565` | 2 | +1.33 s | 0.11 |
+| `aac32f` | 3 | +1.72 s | 0.21 |
+| `347386` | 5 | +1.86 s | 0.24 |
+| `34659a` | 4 | +2.09 s | 0.26 |
+| `345318` | 3 | **−12.93 s** | 3.15 |
+
+**Magnitude in context.** At 240 m/s a 1.5 s offset is 360 m and the −12.9 s
+airframe is 3.1 km. The alternative to having an ADS-C sample at all is a
+straight line interpolated across a ten-minute reception hole, whose own error
+is tens of kilometres. The timing skew is therefore a correction worth
+reporting, not a reason to withhold the merge.
+
+**What is done about it**
+
+| Decision | Choice | Why |
+|---|---|---|
+| Measure it | New job `benchmarks/adsc_time_sync.py`, own paper chapter | A skew nobody has sized cannot be reasoned about |
+| Global time correction | `AdscConfig.time_offset_seconds = 0.0`, **off** | The skew is per-airframe; a constant would harm the synchronised aircraft |
+| Shadow window | Split into `shadow_before_seconds` / `shadow_after_seconds` | "The same observation" is not centred on zero once a feed lags; a −12.9 s airframe falls outside a window a symmetric one would centre wrongly |
+| Derivative-spike filter | **Unchanged** | `latlon_d1_max_deg_s = 0.01` is ~1,100 m/s of apparent ground speed; 377 m (or 3.1 km) over a 600 s gap adds 0.0006 (or 0.005) deg/s. The filter is blind to this, and a guard would be machinery for a risk that is not there |
+| Per-airframe correction | **Not in v1** | The method is this measurement; applying it needs a stability study over weeks, and 25 airframes on one day cannot support it |
+| `last_pos_update` | Stays `time − seen_pos`, documented as the feed's *assertion* | `seen_pos` is constant 0 and the measurement shows that assertion is false by ~1.5 s |
+
+**The interpolation exposure, stated rather than fixed.** `segment_id` exists
+(`cleaning/native.py::add_segment_id`, splitting at 300 s holes) and is read by
+**no detector** — `grep -rn segment_id src/opdi/pipeline/` finds it in two
+comments only. So nothing in the pipeline today prevents an event from being
+interpolated between an ADS-B and an ADS-C sample, and any event so derived
+inherits the along-track displacement. That is a pre-existing property (the
+same detectors already interpolate across 30-minute ADS-B holes), it is not
+introduced by this change, and this branch does not fix it: making `segment_id`
+load-bearing changes published detector behaviour and belongs in its own study.
+It is reported in the paper's limitations chapter.
+
 ## Honest expectation
 
 ADS-C cannot reach the runway or A-CDM milestone families: it has no
@@ -107,3 +190,6 @@ must report per-family so the two cannot be confused.
   detector.
 - Synthetic gap filling between an ADS-B and an ADS-C sample (a documented PRC
   negative result).
+- Per-airframe time-offset correction, and making `segment_id` load-bearing.
+  Both are named in the paper as follow-ups with the measurement that
+  motivates them.
