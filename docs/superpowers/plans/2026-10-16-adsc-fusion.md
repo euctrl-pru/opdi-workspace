@@ -103,7 +103,8 @@ safe to run first and its result can redirect later tasks.
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `census(df, bbox) -> DataFrame` — one row per sampled day with columns `day STRING`, `rows LONG`, `rows_in_box LONG`, `airframes LONG`, `airframes_in_box LONG`, `median_cadence_s DOUBLE`, `rows_above_fl300 LONG`, `rows_below_10000ft LONG`, `rows_west_of_10w LONG`, `exact_duplicate_rows LONG`, plus one `fill_<column>` DOUBLE per source column. Task 12 reads its CSV.
+- Produces: `census(df, bbox) -> DataFrame` — one row per sampled day with columns `day STRING`, `hour_partitions INT`, `rows LONG`, `rows_in_box LONG`, `airframes LONG`, `airframes_in_box LONG`, `median_cadence_s DOUBLE`, `in_box_above_fl300 LONG`, `in_box_below_10000ft LONG`, `in_box_west_of_10w LONG`, `in_box_on_ground LONG`, `exact_duplicate_rows LONG`, plus one `fill_<column>` DOUBLE per name in `TRACKED` — **0.0 for a column absent from the frame, never omitted**. Also `hour_paths`, `existing`, `read_day` (returning `(frame, n_partitions)`). Task 12 reads its CSV.
+- **Status: DONE.** Built, tested (6 tests) and run over eleven days; `benchmarks/out/adsc_census/adsc_census.csv` is committed. The notes below record what changed against the plan as written.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -166,12 +167,30 @@ def test_median_cadence_is_per_airframe_and_ignores_duplicates(spark, feed):
     assert r["median_cadence_s"] == pytest.approx(600.0, abs=0.1)
 
 
-def test_altitude_bands_and_duplicates(spark, feed):
+def test_altitude_and_geography_bands_are_counted_inside_the_box(spark, feed):
+    # In the box, not over the whole feed: the box is the population OPDI would
+    # ingest, so it is the one a claim about what ADS-C can reach has to be
+    # made over. 3c6568's two FL380 rows sit at 40W and must not be counted.
     r = adsc_census.census(feed, EUROPE_BBOX).collect()[0]
-    assert r["rows_above_fl300"] == 4
-    assert r["rows_below_10000ft"] == 1
-    assert r["rows_west_of_10w"] == 2
+    assert r["in_box_above_fl300"] == 2       # the two FL350 rows, not the FL380 pair
+    assert r["in_box_below_10000ft"] == 1
+    assert r["in_box_west_of_10w"] == 0       # -5/-6/-7 are all east of 10W
+    assert r["in_box_on_ground"] == 0
+
+
+def test_exact_duplicates_are_counted(spark, feed):
+    r = adsc_census.census(feed, EUROPE_BBOX).collect()[0]
     assert r["exact_duplicate_rows"] == 1
+
+
+def test_a_column_absent_from_the_feed_is_not_silently_omitted(spark, feed):
+    # The census exists to answer "is this field ever populated". A column that
+    # vanished from the feed must read as 0.0, not disappear from the report --
+    # an absent row and a zero mean different things and only one of them is a
+    # measurement.
+    r = adsc_census.census(feed, EUROPE_BBOX).collect()[0]
+    for absent in ("ias", "tas", "oat", "nav_altitude_mcp", "registration"):
+        assert r[f"fill_{absent}"] == pytest.approx(0.0)
 
 
 def test_fill_rate_is_reported_per_column(spark, feed):
@@ -274,19 +293,34 @@ def census(df: DataFrame, bbox) -> DataFrame:
     )
 
     fills = [
-        (F.sum(F.col(c).isNotNull().cast("double")) * 100.0 / F.count("*"))
-        .alias(f"fill_{c}")
-        for c in TRACKED if c in df.columns
+        (
+            (F.sum(F.col(c).isNotNull().cast("double")) * 100.0 / F.count("*"))
+            if c in df.columns
+            else F.lit(0.0)
+        ).alias(f"fill_{c}")
+        for c in TRACKED
     ]
 
+    # The altitude and geography bands are counted **inside the box**, not over
+    # the whole feed. That is the population OPDI would ingest, so it is the
+    # one a claim about what ADS-C can reach has to be made over. Counting them
+    # globally gives a similar-looking percentage for a different population --
+    # and two tables quoting "97.6% above FL300" about different denominators
+    # is worse than one table quoting nothing.
     base = df.agg(
         F.count("*").alias("rows"),
         F.sum(in_box.cast("long")).alias("rows_in_box"),
         F.countDistinct("hex").alias("airframes"),
         F.countDistinct(F.when(in_box, F.col("hex"))).alias("airframes_in_box"),
-        F.sum((F.col("alt_baro_ft") > 30000).cast("long")).alias("rows_above_fl300"),
-        F.sum((F.col("alt_baro_ft") < 10000).cast("long")).alias("rows_below_10000ft"),
-        F.sum((F.col("lon") < -10.0).cast("long")).alias("rows_west_of_10w"),
+        F.sum((in_box & (F.col("alt_baro_ft") > 30000)).cast("long"))
+        .alias("in_box_above_fl300"),
+        F.sum((in_box & (F.col("alt_baro_ft") < 10000)).cast("long"))
+        .alias("in_box_below_10000ft"),
+        F.sum((in_box & (F.col("lon") < -10.0)).cast("long"))
+        .alias("in_box_west_of_10w"),
+        F.sum((in_box & F.col("on_ground")).cast("long"))
+        .alias("in_box_on_ground")
+        if "on_ground" in df.columns else F.lit(0).cast("long").alias("in_box_on_ground"),
         *fills,
     )
     return base.crossJoin(cadence).crossJoin(dupe_rows)
@@ -295,7 +329,7 @@ def census(df: DataFrame, bbox) -> DataFrame:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `.venv310/bin/python -m pytest tests/test_adsc_census.py -q`
-Expected: PASS (5 tests)
+Expected: PASS (6 tests)
 
 - [ ] **Step 5: Add the S3 reader and CLI**
 
@@ -445,6 +479,28 @@ Read `fill_ias`, `fill_tas`, `fill_oat`, `fill_wd`, `fill_nav_altitude_mcp`,
 day, stop and report: the spec's "populated fields only" decision was taken on
 the assumption they are always empty, and a populated field is a reason to
 revisit it with the user rather than to quietly add a column.
+
+**Result: the gate passed.** All 21 candidate fields measured 0.0% on all
+eleven days (2023-09-01 → 2026-10-15). The "populated fields only" schema in
+Task 3 stands as written.
+
+**Two findings the plan did not anticipate, both recorded in the spec:**
+
+1. **The feed's schema has grown.** `track`, `gs` and `baro_rate` are 0% until
+   somewhere between 2025-03-01 and 2025-09-01; `flight`, `squawk` and
+   `on_ground` are 0% until between 2026-03-22 and 2026-06-01. Before roughly
+   2025-09 the feed is position and barometric altitude only. For this study
+   that is harmless -- the three study days are fully populated and the
+   callsign is dropped anyway -- but a merged arm over 2023-2024 would write
+   ADS-C rows with NULL `velocity` and `vert_rate`. If the study period ever
+   moves back, that has to move with it.
+2. **Zero exact duplicates on any of the eleven days.** The
+   `dropDuplicates(["icao24", "event_time", "lat", "lon"])` in Task 3 has
+   never had anything to remove. Keep it -- it is one hash aggregate over five
+   thousand rows and the topic is Kafka-sourced, so the guarantee is
+   at-least-once whatever today's data shows -- but say in its comment that it
+   has never fired, so a later reader does not infer a problem that was never
+   observed.
 
 ```bash
 git add benchmarks/out/adsc_census/adsc_census.csv
@@ -962,6 +1018,13 @@ class AdscIngestion:
         # appears twice; two genuinely different positions at the same instant
         # are a data problem for step 02a's dedup to arbitrate, not something
         # to discard here.
+        #
+        # Measured: **zero** duplicates on each of the eleven census days
+        # (2023-09 to 2026-10), so this has never had anything to remove. Kept
+        # because the delivery guarantee is at-least-once whatever today's data
+        # shows, and it is one hash aggregate over a few thousand rows -- but
+        # noted, so a later reader does not infer a problem that was never
+        # observed.
         df = df.dropDuplicates(["icao24", "event_time", "lat", "lon"])
 
         # The global time correction, normally a no-op. Applied here rather
@@ -4331,15 +4394,21 @@ Append:
 if (is.null(census)) {
   cat(missing_note("adsc_census.csv"))
 } else {
-  cols <- c("day", "rows", "rows_in_box", "airframes_in_box",
-            "median_cadence_s", "rows_above_fl300", "rows_below_10000ft",
-            "rows_west_of_10w", "exact_duplicate_rows")
+  cols <- c("day", "hour_partitions", "rows", "rows_in_box",
+            "airframes_in_box", "median_cadence_s", "in_box_above_fl300",
+            "in_box_below_10000ft", "in_box_west_of_10w", "in_box_on_ground",
+            "exact_duplicate_rows")
   kable(census[, cols], row.names = FALSE,
-        col.names = c("Day", "Rows", "In box", "Airframes in box",
-                      "Median cadence (s)", "> FL300", "< 10,000 ft",
-                      "West of 10°W", "Exact duplicates"),
-        caption = paste("The raw ADS-C topic, by sampled day.",
-                        "`In box` is OPDI's published European coverage box."))
+        col.names = c("Day", "Hours read", "Rows", "In box",
+                      "Airframes in box", "Median cadence (s)", "> FL300",
+                      "< 10,000 ft", "West of 10°W", "On ground",
+                      "Exact duplicates"),
+        caption = paste("The raw ADS-C topic, by sampled day. Every band after",
+                        "`In box` is counted **inside** OPDI's published",
+                        "European coverage box -- that is the population the",
+                        "pipeline would ingest. `Hours read` matters: a day",
+                        "with 6 of 24 partitions present has a cadence that",
+                        "reflects the gap, not the feed."))
 }
 ```
 

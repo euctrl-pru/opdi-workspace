@@ -12,33 +12,57 @@ extraction.**
 
 ## What the source actually is
 
-Measured on `s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro`,
-day 2026-06-01 (251 objects, 4.9 MB, read end to end):
+Measured on `s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro`.
+First read end to end for 2026-06-01 (251 objects, 4.9 MB), then by
+`benchmarks/adsc_census.py` over **eleven days spanning 2023-09-01 to
+2026-10-15** (`benchmarks/out/adsc_census/adsc_census.csv`). Ranges below are
+across all eleven; the parenthesised figure is the three study days
+(2026-06-05/06/07), each of which read all 24 hourly partitions.
 
 | Fact | Value |
 |---|---|
-| Rows, worldwide | 23,116 / day |
-| Rows inside `EUROPE_BBOX` | 4,973 / day (21.5%) |
-| Distinct airframes in box | 941 |
-| Median cadence per airframe | **~600 s** |
-| In-box rows above FL300 | 97.6% |
-| In-box rows below 10,000 ft | 48, all day |
-| In-box rows west of 10°W | 74.5% |
-| `on_ground` true | never |
+| Rows, worldwide | 409 – 32,206 / day (25,714 – 27,891) |
+| Rows inside `EUROPE_BBOX` | 140 – 5,420 / day (4,725 – 5,420) |
+| Share of rows in box | 6.7 – 34.2% (18.4 – 19.4%) |
+| Distinct airframes in box | 74 – 994 (953 – 994) |
+| Median cadence per airframe | 277 – 1,139 s (**543 – 568 s**) |
+| In-box rows above FL300 | **94.4 – 98.6%** (96.8 – 98.0%) |
+| In-box rows below 10,000 ft | 1 – 67 / day (44 – 67) |
+| In-box rows west of 10°W | **65.8 – 83.8%** (75.2 – 76.9%) |
+| In-box rows with `on_ground` true | **0 on every day** |
+| Exact duplicate rows | **0 on every day** |
 | Partition coverage | 2023-07-07 → now, 982 days, 24 gaps >1 day |
 
-Populated columns: `time`, `hex`, `lat`, `lon`, `alt_baro_ft` (100%),
-`track` (99.7%), `flight` (97.7%), `gs` (58%, kt), `baro_rate` (58%, ft/min),
-`squawk` (44%), `messages`.
+The 2026-03-22 day read only 6 of 24 partitions — it was picked deliberately
+from the gap list — and its 277 s cadence is a partial-coverage artefact, not a
+denser feed. The study days are the ones to read.
 
-**100% NULL** on the sampled day: `alt_geom`, `ias`, `tas`, `mach`,
-`mag_heading`, `true_heading`, `roll`, `track_rate`, `geom_rate`, `oat`, `tat`,
-`wd`, `ws`, `nav_qnh`, `nav_altitude_mcp`, `nav_altitude_fms`, `nav_heading`,
-`nav_modes`, `registration`, `ac_type`, `ac_desc`, `category`, `version`,
-`nic_baro`, `nac_p`, `nac_v`, `sil`, `sil_type`, `gva`, `sda`, `rr_lat`,
-`rr_lon`, `last_position`, `gps_ok_before`, `db_flags`.
-Constant placeholders: `nic`=0, `rc`=0, `seen`=0, `seen_pos`=0, `rssi`=−49.5,
-`mlat`=`[]`, `tisb`=`[]`, `type`=`'adsc'`.
+**The feed's schema has grown, and that was not anticipated.** Fill rates by
+day show two step changes, so a historical ADS-C study gets materially less
+than a 2026 one:
+
+| Column | 2023-09 → 2025-03 | 2025-09 → 2026-03 | 2026-06 → 2026-10 |
+|---|---|---|---|
+| `time`, `hex`, `lat`, `lon`, `alt_baro_ft` | 100% | 100% | 100% |
+| `track` | **0%** | 99.9% | 99.7 – 99.9% |
+| `gs`, `baro_rate` | **0%** | 65 – 82% | 58 – 71% |
+| `flight`, `squawk`, `on_ground` | **0%** | **0%** | 97 – 98% / 38 – 51% / 100% |
+
+So before roughly 2025-09 the feed is position and barometric altitude only:
+no ground speed, no vertical rate, no callsign. For this study that is mostly
+harmless — the callsign is deliberately dropped anyway — but a merged arm over
+2023–2024 would write ADS-C rows with NULL `velocity` and `vert_rate`, and any
+speed-based detector sees NULL rather than a value on those rows.
+
+**0% on every one of the eleven days** — the gate the schema decision rests
+on: `alt_geom`, `ias`, `tas`, `mach`, `mag_heading`, `true_heading`, `roll`,
+`track_rate`, `geom_rate`, `oat`, `tat`, `wd`, `ws`, `nav_qnh`,
+`nav_altitude_mcp`, `nav_altitude_fms`, `nav_heading`, `registration`,
+`ac_type`, `ac_desc`, `category`. Also NULL throughout: `nav_modes`,
+`version`, `nic_baro`, `nac_p`, `nac_v`, `sil`, `sil_type`, `gva`, `sda`,
+`rr_lat`, `rr_lon`, `last_position`, `gps_ok_before`, `db_flags`.
+Constant placeholders rather than measurements: `nic`=0, `rc`=0, `seen`=0,
+`seen_pos`=0, `rssi`=−49.5, `mlat`=`[]`, `tisb`=`[]`, `type`=`'adsc'`.
 
 Objects are **snappy Parquet** despite the `.avro` in the topic name, carrying
 the Avro schema `org.opensky.avro.readsb.Aircraft` in the footer.
@@ -167,7 +191,7 @@ must report per-family so the two cannot be confused.
 | Schema | Populated fields mapped into existing SI columns, plus `source` | Nothing invented; no column added for data that does not exist |
 | `source` column | Added **only** when `adsc.enabled` | A column appearing in new partitions of a production table and not old ones breaks `spark.read.parquet` schema inference silently |
 | ADS-C callsign | `NULL` | See fact 1 |
-| Extras struct | Not added | All candidate fields are 100% NULL; Task 1 confirms across history |
+| Extras struct | Not added | All 21 candidate fields measured 0.0% on all eleven census days, 2023-09 to 2026-10 — **gate passed** |
 | Paper scope | Full flight-events-v4 comparison, both arms, same 20 aerodromes | What was asked; per-family split makes a null result legible |
 | Benchmark period | `2026-06-05`…`07`, APDF `202606` | `events_gt.PERIODS["2026"]` — the only month whose extract covers all twenty study aerodromes |
 | Both arms rebuilt | Yes, baseline too | The existing V4 2026 tables were built by A8 `recommended`; reusing them would mix the segmentation change into the ADS-C delta |
