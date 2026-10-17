@@ -2335,32 +2335,48 @@ git add benchmarks/run_adsc_day.py tests/test_run_adsc_day.py
 git commit -m "feat(adsc): two-arm day runner over research prefixes"
 ```
 
-- [ ] **Step 6: Build the shared inputs for the three benchmark days**
+- [ ] **Step 6: Prove the ADS-C ingest works before spending the day on ADS-B**
 
-Run (needs credentials; the ADS-B ingest is the expensive part, ~1 h/day):
+Run (needs credentials; cheap -- the ADS-C topic is a few megabytes):
 ```bash
 export PYSPARK_DRIVER_PYTHON=$PWD/.venv310/bin/python
-unset PYSPARK_PYTHON
-for d in 2026-06-05 2026-06-06 2026-06-07; do
-  .venv310/bin/python -u benchmarks/run_adsc_day.py \
-    --day $d --arm merged --steps 01 01b --executors 8
-done
+unset PYSPARK_PYTHON OPDI_WAREHOUSE
+.venv310/bin/python -u benchmarks/run_adsc_day.py \
+  --day 2026-06-05 --arm merged --steps 01b --executors 4
 ```
 
-Expected: step 01 reports three day partitions fetched per day; step 01b
-reports `~69/72 hourly partitions present` and a few thousand rows written.
-**A step 01b that reports 0 rows is a stop:** the bbox filter, the topic path
-or the credentials are wrong, and every later number would be a baseline
-measured twice.
+Expected: `ADS-C: 72/72 hourly partitions present (2026-06-04 to 2026-06-07)`
+and roughly 15,000 rows written across 3 day partitions -- the census says
+4,725-5,420 in-box rows a day. **A step 01b that reports 0 rows is a stop:**
+the bbox filter, the topic path or the credentials are wrong, and every later
+number would be a baseline measured twice.
 
-- [ ] **Step 7: Build both arms for the three days**
+- [ ] **Step 7: Build both arms, one day at a time, all steps**
+
+**Day-major, not step-major, and this is not a preference.** Step 01 keeps a
+three-day sliding window and drops the partitions the window has moved past,
+so ingesting 2026-06-07 (window 06-08) deletes the state vectors for 06-04 and
+06-05. A loop that ingested all three days first and segmented afterwards would
+hand day 05's step 02 a window that is two-thirds absent -- which claims almost
+no tracks and writes an `osn_tracks` whose schema cannot be inferred
+downstream, the failure `StateVectorIngestion.ingest_from_s3` documents.
+`periodrun.run_period` is day-major for exactly this reason
+(`periodrun.py:876-878`).
 
 ```bash
 for d in 2026-06-05 2026-06-06 2026-06-07; do
   .venv310/bin/python -u benchmarks/run_adsc_day.py \
-    --day $d --arm both --steps 02 02a 03 04 04b --executors 8
+    --day $d --arm both --executors 8          # all seven steps, both arms
 done
 ```
+
+Within one invocation `--arm both` runs the baseline fully and then the merged
+arm, so steps 01 and 01b run twice per day. That is deliberate and nearly free:
+01 finds its window already present and fetches nothing, and 01b rewrites the
+same three ADS-C partitions in seconds. The alternative -- hoisting them out --
+would mean the two arms no longer provably read the same input.
+
+Roughly an hour per arm-day; budget six cluster-hours for the three days.
 
 - [ ] **Step 8: Verify the arms differ, and differ only where expected**
 
