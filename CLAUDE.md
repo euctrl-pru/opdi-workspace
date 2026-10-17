@@ -54,25 +54,71 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
 - **Units: storage is SI, everything human-facing is aviation.** The OSN schema is SI — altitudes in **metres**, velocity and `vert_rate` in **m/s** — because it mirrors OpenSky's own schema. Everything OPDI *publishes* is aviation: `events.py` emits `altitude_ft`, `roc_ft_min`, `speed_kt`, `FL`, `cumulative_distance_nm`, converting at point of use (`* 3.28084` → ft, `* 196.850394` → ft/min, `* 1.94384` → kt).
   **New config thresholds go in aviation units, with the unit in the field name** (`baro_altitude_d1_max_ft_s`, not a converted SI constant). Where a threshold must meet SI data, scale the *comparison*, not the stored value — `cleaning/native.py:AVIATION_UNIT_FACTOR` is the pattern, and it works there because the output is a NULL mask, which carries no unit. Reuse the constants above rather than introducing new ones, so the two can never drift. Getting units wrong is the most likely source of a silent bug: a threshold 3.28× too large simply never fires.
 - **Do not convert the storage layer to aviation units.** `track_gap_low_altitude_meters` feeds the gap family of segmentation rules, whose thresholds are a published contract; changing it breaks `track_id` continuity with data published under those thresholds. The `osn_tracks` DDL comments are also a published contract.
-- **Track identity is a versioned choice, not a frozen rule.** As of 2026-08-27
-  the default segmentation is A8 `recommended` (group on `icao24`, break on a
-  genuine non-blank callsign change with the lookback bounded to the gap
-  threshold), selected through `src/opdi/pipeline/segmentation/`. **`track_id`
-  changes shape from the next production run forward** — A8 carries no
-  `_{year}_{month}` suffix, so identifiers become `{hash}_{offset}` and any
-  consumer parsing the suffix breaks. Past months will not reproduce. Every
-  dataset published before this date used the legacy rule, which stays
-  reachable as the `legacy` arm. See `opdi-portal/papers/track-construction-v1/`.
-  A9 `debounced` (`callsign_min_persistence_seconds`, `feat/segmentation-callsign-debounce`)
-  is **available but not the default** — it requires a callsign to persist for
-  a threshold before treating a change as real, suppressing splits caused by a
-  callsign flickering to a garbled value and back (measured: 23.1% of A8's
-  track boundaries trace to a flicker leg; the arm gives ~19% fewer tracks,
-  merge-neutral against A8). It defaults to `0`, which reproduces A8 exactly.
-  Promoting it to default would change `track_id` again, the same cost A8
-  itself carried — a decision for the owner of the published contract, not
-  made by this note. See `opdi-portal/papers/track-construction-v3/` (commit
-  8bd2f30 documents the A9 investigation).
+- **Track identity is a versioned choice, not a frozen rule.** The default
+  segmentation is now A9 `debounced` (`callsign_min_persistence_seconds = 30`),
+  selected through `src/opdi/pipeline/segmentation/`. A9 is A8 plus one guard:
+  it treats a callsign change as real only if the new value persists for 30 s
+  before the next transition, so a callsign flickering to a garbled value and
+  back (X→Y→X) no longer splits one flight into several. Measured: 23.1% of A8's
+  track boundaries traced to a flicker leg; A9 gives ~19% fewer tracks,
+  merge-neutral against A8. The `method` value `standard` is a **pointer to the
+  current production arm** and now resolves to `debounced`; it resolved to A8
+  `recommended` between 2026-08-27 and this change. **Two `track_id` boundaries
+  now exist, and both are silent to a joiner (empty join, not an error):**
+  (1) at 2026-08-27, legacy → A8, when the `_{year}_{month}` suffix vanished and
+  ids became `{hash}_{offset}`; (2) at this change, A8 → A9, when the debounce
+  altered which samples share an id. Prior rules stay reachable for
+  reproduction under their own names: `recommended` is A8 (it ignores the
+  persistence field), `legacy` is the pre-2026-08-27 rule. A9 at
+  `callsign_min_persistence_seconds = 0` is textually identical to A8, so
+  zeroing it is an alternative way to reproduce A8 by config. Nothing in the
+  published data says which rule produced a row — `osn_tracks` has no version
+  column — so a consumer comparing across either boundary must be told. See
+  `opdi-portal/papers/track-construction-v1/` (legacy → A8) and
+  `track-construction-v3/` (the A9 investigation; commit 8bd2f30). **The
+  track-construction-v3 paper still describes A9 as available-but-not-default
+  and needs a follow-up render to reflect the promotion.**
+- **ADS-C is a second source, off by default.** `AdscConfig.enabled`
+  (`src/opdi/config.py`) unions OpenSky's ADS-C topic
+  (`s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro`, hourly
+  `hour=<unix>` partitions, snappy parquet despite the `.avro` name) into the
+  state-vector frame **before** segmentation, via step 01b and
+  `TrackProcessor._merge_adsc`. Enabling it is a fourth `track_id` boundary
+  after legacy -> A8 -> A9 and is silent to a joiner, so the study arms live at
+  `s3a://eurocontrol/opdi/research/adsc/{base,merged}` and nothing published
+  moves. **What the feed is**, measured over eleven days 2023-09 to 2026-10
+  (`benchmarks/adsc_census.py`, staged at `benchmarks/out/adsc_census/`):
+  140-5,420 rows/day inside `EUROPE_BBOX` from 74-994 airframes, median cadence
+  277-1,139 s, 94-99% above FL300, 66-84% west of 10W, `on_ground` **never**
+  true, 1-67 rows/day below 10,000 ft, and 21 candidate extra fields (`ias`,
+  `tas`, `mach`, `oat`, `wd`/`ws`, `nav_altitude_mcp`, `registration`,
+  `ac_type`, `alt_geom`, ...) at **0.0% on every day**. The feed's schema grew:
+  `track`/`gs`/`baro_rate` empty before ~2025-09, `flight`/`squawk`/`on_ground`
+  before ~2026-06, so a merged arm over 2023-2024 writes NULL `velocity` and
+  `vert_rate`. **Three things are easy to get wrong.** The `flight` field is the
+  **IATA** number (`LH133`), not the ICAO callsign ADS-B broadcasts
+  (`DLH133`), so it is dropped -- carried through, the A9 callsign-change break
+  would split every merged track at its first ADS-C sample. The 5 s thinning
+  rules are not applied (`modulo` would delete a feed whose instants are
+  arbitrary millisecond doubles). And `CleaningConfig.sparse_sources` exempts
+  ADS-C from the isolated-point and stale-broadcast stages, without which step
+  02a NULLs every ADS-C value (20 s rule, ~600 s cadence) and the fusion
+  measures as a no-op. The `source` column exists **only** in a run with the
+  flag on -- a column present in new partitions of a production table and
+  absent from old ones breaks `spark.read.parquet` schema inference silently.
+  **The two feeds do not share a clock:** median +1.48 s along-track against
+  interpolated ADS-B (9 m cross-track vs 377 m along-track, a 43x ratio, so it
+  is timing and not position; ADS-B's own position age is <=0.92 s and
+  correlates at 0.23), and the offset is a property of the *individual
+  airframe* -- sigma 0.10-0.31 s within one, +0.01 s to +2.09 s between them,
+  one at -12.9 s. So `time_offset_seconds` ships at 0.0: a constant would
+  damage the aircraft already synchronised. `benchmarks/adsc_time_sync.py` is
+  the instrument. The derivative-spike filter is deliberately untouched
+  (`latlon_d1_max_deg_s` is ~1,100 m/s of apparent speed, three orders of
+  magnitude above this error). See
+  `docs/superpowers/plans/2026-10-16-adsc-fusion.md` and
+  `opdi-portal/papers/adsc-fusion-v1/`.
+- **Geographic coverage is one `CoverageConfig` (`src/opdi/coverage.py`), not six copies.** It used to be a bounding box written out six times across five files — four of them textually identical `LAT_MIN`/`LAT_MAX`/`LON_MIN`/`LON_MAX` class constants with no link between them, so widening coverage meant finding all six and missing one produced no error (ingest keeps rows detection zones don't cover — a silent wrong answer, not a crash). The European box (`opdi.coverage.EUROPE_BBOX`) is the default and is a **published contract**: it reaches every released `track_id` and every detection study tuned inside it, and it must stay byte-identical. `bbox=None` means worldwide — `OPDIConfig.for_environment(env, worldwide=True)` — and is not a box of ±180/±90, because a longitude range cannot express "everywhere" once the coordinate wraps at the antimeridian; it compiles to `lit(True)` instead. Worldwide writes to its own warehouse (`opdi-world`) rather than the European one, and `OPDI_WAREHOUSE` is **deliberately ignored** under worldwide — that variable is how production points at the European prefix and is normally exported, so honouring it there too would silently send planet-wide rows into `opdi-prod`. A `coverage_marker` table stamps each warehouse with the coverage that built it and refuses to mix: pointing a worldwide run at a warehouse already marked European fails at step 00 naming both coverages. Out-of-area (`OOA`) labelling is inert worldwide (there is no edge to have crossed), and step 00c (airspaces) does not run worldwide (its ANSP/FIR sources are European; there is no global FIR source). See `opdi/readme.md`'s "Worldwide coverage" section and `opdi-benchmarker/README.md`, which follows the same switch for its source and cache but not its reference prefix (APDF is European regardless of pipeline coverage).
 - **Never mutate a published `version` string.** New algorithms get a new `version`; existing event types keep theirs so released data stays reproducible.
 - Executors run `docker/Dockerfile` → `quintengs/opdi-spark`. Any new runtime dependency must be added there or executors will fail at import.
 
@@ -152,3 +198,4 @@ The two winning solutions are the best available evidence on ADS-B cleaning. Key
   column expressions and config presets are testable on a laptop. Anything
   needing S3 or the cluster is not, and stays in `benchmarks/`.
 - `opdi-portal/content/roadmap.qmd:38-43` past-releases table stops at OPDI v0.0.2 (release 3), 2024-12-01. `methodology.qmd:8` separately claims "Latest available methodology versions: v0.0.2 (May/June 2024)". Both are stale; confirm the real current release month against published data before rewriting either.
+- **Resolved:** the six-copy bounding-box duplication noted above is fixed — coverage now lives in one `CoverageConfig` (`src/opdi/coverage.py`), consumed by ingestion, detection and all three H3 reference generators (zones, layouts, runway grid). Left in this list as history, not as an open item.
