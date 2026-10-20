@@ -171,6 +171,88 @@ introduced by this change, and this branch does not fix it: making `segment_id`
 load-bearing changes published detector behaviour and belongs in its own study.
 It is reported in the paper's limitations chapter.
 
+## Measured outcome (campaign of 2026-10-19/20)
+
+Both arms built for 2026-06-05/06/07, ~5h05m, zero fatal errors. All seven
+outputs staged under `papers/adsc-fusion-v1/data/`.
+
+### Trajectories
+
+| | base | merged |
+|---|---|---|
+| Rows | 152,071,295 | 152,082,840 |
+| ADS-C rows surviving cleaning | 0 | **12,941** |
+| Tracks | 140,437 | 141,232 |
+| Tracks carrying ADS-C | 0 | 3,832 |
+| **Tracks made only of ADS-C** | 0 | **905** |
+| Track-hours | 216,208 | 218,228 |
+| Two-callsign tracks (fusion guard) | 9,244 | **9,244** |
+
+**The track count rose by 795, and that decomposes into +905 new tracks
+against a net −110 among shared tracks.** The 905 are airframes ADS-B never
+heard in the window, which had no baseline track at all; the −110 is bridging
+joining tracks. The headline rise is new coverage, not fragmentation. The
+original gate in this spec ("a rise means splitting") was wrong, and
+`tracks_all_adsc` exists because the bare count cannot distinguish the three
+mechanisms. Both figures are nets, so they bound a dominant effect rather than
+excluding an absent one.
+
+Of the 12,941 ADS-C samples, **12,498 (96.6%) sat >300 s from an ADS-B sample
+on both sides**; **12,138** of those extended a track past its last ADS-B
+report, and **360** bridged a genuine interior hole (median smaller side 19
+min, p90 32 min). Of 41,710 matched airframe-days, 1,951 start earlier and
+1,258 end later. **Fusion: exactly zero.**
+
+### Time synchronisation at scale
+
+764 bracketed pairs over 293 airframes, against the prototype's 46/25:
+
+| | Prototype | Campaign |
+|---|---|---|
+| Median \|cross-track\| | 9 m | **8.7 m** |
+| Median \|along-track\| | 377 m | **415.4 m** |
+| Along:cross ratio | 43× | **48×** |
+| Median implied offset | +1.48 s | **+1.41 s** |
+
+The central finding reproduces: the residual is **timing, not position**. Two
+claims in this spec needed narrowing:
+
+- **"ADS-B staleness cannot explain it (max 0.92 s)" is withdrawn for the
+  tail.** Position age reaches **152.3 s** — 36.6 km at cruise. At the median
+  (0.34 s, ≈82 m, correlation 0.21) carry-forward cannot account for a 415 m
+  displacement, so the centre is ADS-C skew; the extreme offsets are at least
+  partly a stale reference.
+- **"Tight within an airframe (σ 0.10–0.31 s)" overstated it.** Within-airframe
+  σ spans **0.00–44.76 s** and per-airframe medians **−184.6 to +58.7 s**. The
+  conclusion that a global constant is the wrong fix is *strengthened*, not
+  weakened — the between-aircraft spread dwarfs anything one value could track.
+
+### Milestones
+
+APDF scores four milestones, all A-CDM/runway: `ATOT`, `AOBT`, `AIBT`, `ALDT`.
+
+| Milestone | Truth | base | merged | Δ |
+|---|---|---|---|---|
+| ATOT | 11,675 | 11,235 | 11,235 | **0** |
+| AOBT | 11,674 | 10,521 | 10,521 | **0** |
+| AIBT | 11,657 | 10,113 | 10,111 | −2 |
+| ALDT | 11,657 | 11,087 | 11,085 | −2 |
+
+Bias and MAD identical to one decimal throughout. Per aerodrome: **2 of 80
+cells changed**, both at EGCC, −2 each, bias unchanged. Total −4 of 42,956
+detections (0.009%) — plausibly the claim filter moving a track whose first
+sample shifted before midnight out of the day that owned it, which would also
+explain the 1,396 ADS-B rows the merged arm has fewer of; not verified.
+
+**The hypothesis as originally stated is not supported** — and a stronger
+point: **this scoring cannot test it.** Every milestone APDF holds is in the
+family ADS-C physically cannot reach. `first_seen`, `last_seen`, the FL
+crossings and ADEP/ADES are outside the reference's vocabulary, so the null is
+confirmed where a null was predicted and the coverage gain has *no independent
+reference* against which it can be checked. Closing that needs a different
+reference (Network Manager flight plans for oceanic entry fixes), not more
+APDF days.
+
 ## Honest expectation
 
 ADS-C cannot reach the runway or A-CDM milestone families: it has no
