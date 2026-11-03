@@ -289,6 +289,30 @@ The "Trajectories" section above reads the European +905 as airframes ADS-B neve
 heard. That was not measured this way, and the European tables no longer exist to
 check it. Treat it as unverified.
 
+### ADEP / ADES against Network Manager (same day and subset)
+
+`benchmarks/adsc_flight_list_truth.py` scores both arms per flight, paired. On
+the 1,334 flights crossing the European box and landing that day, far-end ADEP
+stays 395 of 546 right and far-end ADES stays 581 of 788. Over all 2,242 flights
+crossing the box they move 826 to 829 and 645 to 647, part of which may be a
+track stretched past midnight, since only tracks starting on the day were built.
+No right answer is lost. The 72-74% is worldwide ADS-B, present in both arms.
+
+The two ends sit on different rows. These flights average about 2.2 rows, and
+none has both ends right on one row without ADS-C; with it, 0 to 6 of 1,334 (0 to
+21 of 2,242). Rows rise from 12,017 to 13,716, and 1,673 of the 1,699 extra rows
+name no aerodrome.
+
+`benchmarks/adsc_bridging_diagnosis.py` says why. Of 1,680 ADS-B holes over 30 min
+inside these flights: 814 hold no ADS-C, 836 are left with a longer gap, 30 close,
+and none is dense enough yet split. A hole holding ADS-C has a median length of
+235 min and 6 samples, near the 7 even spacing would need, but 61% of it stays one
+silence: the reports bunch. Only 0.1% of hole edges are below 5,000 ft, so these
+are cruise reception holes.
+
+Single day, ADS-C airframes only. Results in
+`opdi/benchmarks/out/adsc_worldwide_subset/`, force-added past `*.csv`.
+
 ## Honest expectation
 
 ADS-C cannot reach the runway or A-CDM milestone families: it has no
