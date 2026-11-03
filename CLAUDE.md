@@ -106,19 +106,30 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
   measures as a no-op. The `source` column exists **only** in a run with the
   flag on -- a column present in new partitions of a production table and
   absent from old ones breaks `spark.read.parquet` schema inference silently.
-  **The two feeds do not share a clock:** median +1.48 s along-track against
-  interpolated ADS-B (9 m cross-track vs 377 m along-track, a 43x ratio, so it
-  is timing and not position; ADS-B's own position age is <=0.92 s and
-  correlates at 0.23), and the offset is a property of the *individual
-  airframe* -- sigma 0.10-0.31 s within one, +0.01 s to +2.09 s between them,
-  one at -12.9 s. So `time_offset_seconds` ships at 0.0: a constant would
-  damage the aircraft already synchronised. `benchmarks/adsc_time_sync.py` is
-  the instrument. The derivative-spike filter is deliberately untouched
+  **The two feeds do not share a clock:** median +1.41 s along-track against
+  interpolated ADS-B (8.7 m cross-track vs 415 m along-track, a 48x ratio, so
+  it is timing and not position; 764 pairs over 293 airframes, 2026-06-05..07).
+  ADS-B's own position age is a median 0.34 s, correlating at 0.21, so it does
+  not explain the centre -- but it reaches 152.3 s, so the extreme offsets are
+  at least partly a stale reference. The offset varies by airframe: per-airframe
+  medians span -184.6 s to +58.7 s, and sigma within one airframe spans 0 to
+  44.76 s. So `time_offset_seconds` ships at 0.0: a constant would damage the
+  aircraft already synchronised. `benchmarks/adsc_time_sync.py` is the
+  instrument. The derivative-spike filter is deliberately untouched
   (`latlon_d1_max_deg_s` is ~1,100 m/s of apparent speed, three orders of
-  magnitude above this error). See
+  magnitude above this error). The study's tables at
+  `research/adsc/{base,merged}` no longer exist and `regenerate_adsc_v1.py`
+  reports its pipeline jobs stale, because the fingerprints now cover
+  `config.py`, `coverage.py` and the runner; only re-running the arms clears
+  that, and it needs room in the 200 GB bucket. A worldwide day (2026-06-05)
+  was measured on only the airframes with ADS-C, because a full day does not
+  fit the bucket: +2,425 tracks and +2,812 track-hours, about 1.4% and 1.2% of
+  a full worldwide day. But 2,440 of the 2,509 ADS-C-only tracks belong to
+  airframes with an ADS-B track that day, so a track count is not a count of
+  newly covered aircraft. See
   `docs/superpowers/plans/2026-10-16-adsc-fusion.md` and
   `opdi-portal/papers/adsc-fusion-v1/`.
-- **Geographic coverage is one `CoverageConfig` (`src/opdi/coverage.py`), not six copies.** It used to be a bounding box written out six times across five files — four of them textually identical `LAT_MIN`/`LAT_MAX`/`LON_MIN`/`LON_MAX` class constants with no link between them, so widening coverage meant finding all six and missing one produced no error (ingest keeps rows detection zones don't cover — a silent wrong answer, not a crash). The European box (`opdi.coverage.EUROPE_BBOX`) is the default and is a **published contract**: it reaches every released `track_id` and every detection study tuned inside it, and it must stay byte-identical. `bbox=None` means worldwide — `OPDIConfig.for_environment(env, worldwide=True)` — and is not a box of ±180/±90, because a longitude range cannot express "everywhere" once the coordinate wraps at the antimeridian; it compiles to `lit(True)` instead. Worldwide writes to its own warehouse (`opdi-world`) rather than the European one, and `OPDI_WAREHOUSE` is **deliberately ignored** under worldwide — that variable is how production points at the European prefix and is normally exported, so honouring it there too would silently send planet-wide rows into `opdi-prod`. A `coverage_marker` table stamps each warehouse with the coverage that built it and refuses to mix: pointing a worldwide run at a warehouse already marked European fails at step 00 naming both coverages. Out-of-area (`OOA`) labelling is inert worldwide (there is no edge to have crossed), and step 00c (airspaces) does not run worldwide (its ANSP/FIR sources are European; there is no global FIR source). See `opdi/readme.md`'s "Worldwide coverage" section and `opdi-benchmarker/README.md`, which follows the same switch for its source and cache but not its reference prefix (APDF is European regardless of pipeline coverage).
+- **Geographic coverage is one `CoverageConfig` (`src/opdi/coverage.py`), not six copies.** It used to be a bounding box written out six times across five files — four of them textually identical `LAT_MIN`/`LAT_MAX`/`LON_MIN`/`LON_MAX` class constants with no link between them, so widening coverage meant finding all six and missing one produced no error (ingest keeps rows detection zones don't cover — a silent wrong answer, not a crash). **Worldwide is the default** (since 2026-10-20, branch `worldwide-default`): `OPDIConfig.for_environment(env)` and every entry point (`run_period.py`, `opdi run`, `opdi.py`) run worldwide unless told otherwise — `worldwide=False` in code, `--europe` on the command line. The European box (`opdi.coverage.EUROPE_BBOX`) is still a **published contract**: it reaches every released `track_id` and every detection study tuned inside it, and it must stay byte-identical — but a caller that wants it now has to ask. Benchmark scripts that call `for_environment()` without `worldwide=` therefore run worldwide too. `bbox=None` means worldwide and is not a box of ±180/±90, because a longitude range cannot express "everywhere" once the coordinate wraps at the antimeridian; it compiles to `lit(True)` instead. Worldwide writes to its own warehouse (`opdi-world`) rather than the European one, and `OPDI_WAREHOUSE` is **deliberately ignored** under worldwide — that variable is how production points at the European prefix and is normally exported, so honouring it there too would silently send planet-wide rows into `opdi-prod`. A `coverage_marker` table stamps each warehouse with the coverage that built it and refuses to mix: pointing a worldwide run at a warehouse already marked European fails at step 00 naming both coverages. Out-of-area (`OOA`) labelling is inert worldwide (there is no edge to have crossed), and step 00c (airspaces) does not run worldwide (its ANSP/FIR sources are European; there is no global FIR source). See `opdi/readme.md`'s "Worldwide coverage" section and `opdi-benchmarker/README.md`, which follows the same switch for its source and cache but not its reference prefix (APDF is European regardless of pipeline coverage).
 - **Never mutate a published `version` string.** New algorithms get a new `version`; existing event types keep theirs so released data stays reproducible.
 - Executors run `docker/Dockerfile` → `quintengs/opdi-spark`. Any new runtime dependency must be added there or executors will fail at import.
 

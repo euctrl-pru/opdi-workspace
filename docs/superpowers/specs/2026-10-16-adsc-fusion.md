@@ -253,6 +253,42 @@ reference* against which it can be checked. Closing that needs a different
 reference (Network Manager flight plans for oceanic entry fixes), not more
 APDF days.
 
+### Worldwide, one day, ADS-C airframes only (2026-11-03)
+
+A full worldwide day is about 21.5 GB per arm (measured on `opdi-world`) and the
+bucket had 12.45 GB free of its 200 GB quota. So both arms were built for
+2026-06-05 on only the airframes present in the ADS-C table, with
+`run_adsc_day.py --worldwide --adsc-airframes-only`. Segmentation partitions by
+airframe, so an airframe without ADS-C is identical in both arms: the
+differences stand and the totals are not the feed's. Staged under
+`opdi/benchmarks/out/adsc_worldwide_subset/`.
+
+| | base | merged | full-feed reference (2026-06-14) |
+|---|---|---|---|
+| Rows | 11,576,848 | 11,605,132 | 157,835,565 |
+| ADS-C rows surviving cleaning | 0 | 25,682 | |
+| Tracks | 11,698 | 14,123 | 176,863 |
+| Track-hours | 16,972 | 19,784 | 229,763 |
+| Two-callsign tracks | 365 | 366 | |
+
+That is +2,425 tracks and +2,812 track-hours, about 1.4% and 1.2% of a full day.
+The reference is a different day, so read both as orders of magnitude.
+
+Where the 25,682 samples sit: 13,095 on tracks with no ADS-B, 11,645 past one
+end of a track, and 942 inside a track, of which 838 are more than 300 s from
+ADS-B on both sides (smaller side: median 30 min, p90 81 min).
+
+**The ADS-C-only tracks are mostly not newly covered aircraft.** Of 2,509, 2,440
+belong to an airframe with an ADS-B track that day, 1,030 are a single sample,
+and 12 airframes have no ADS-B in the whole three-day window. Each of those
+tracks is either a stretch of a flight ADS-B saw, cut off by the gap rule, or a
+whole flight ADS-B missed by an airframe it heard on another. This measurement
+cannot separate them.
+
+The "Trajectories" section above reads the European +905 as airframes ADS-B never
+heard. That was not measured this way, and the European tables no longer exist to
+check it. Treat it as unverified.
+
 ## Honest expectation
 
 ADS-C cannot reach the runway or A-CDM milestone families: it has no
