@@ -127,8 +127,8 @@ Three measurements, for the grid of parameter values:
 1. **Real holes against Network Manager.** Attach truth by `icao24` and time, never
    callsign, because scoring the callsign test by a callsign join is circular. Each
    linked hole is a true link if it lies within one flight's `[t_off, t_land]`, a
-   **false join** if a truth landing and a later take-off of that airframe fall inside
-   it, and unknown otherwise. Report the unknown share.
+   **false join** if any truth landing or take-off of that airframe falls inside it,
+   since with both edges at cruise either one proves a stop, and unknown otherwise. Report the unknown share.
 2. **Negative controls: a real landing hidden in a hole.** For consecutive truth
    flights of one airframe, delete from a cut point in flight 1 to a cut point in
    flight 2 and apply the rule there. A link is a false join. The base cut is the last
