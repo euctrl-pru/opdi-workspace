@@ -71,6 +71,8 @@ it. **All** of these must hold, and a NULL in any required input means not linka
 | No time for a stop | `gap - gc_nm / V_fast * 60 < link_min_stop_minutes`, with `V_fast` the fastest plausible ground speed. Off at 0.0 | `link_min_stop_minutes` 0.0, `link_vfast_kt` 650.0 |
 | Real address | `icao24` not `000000`, `000001`, `ffffff` | constant |
 
+Edge positions read through blank samples: the old edge is the last non-blank position within `link_edge_position_minutes` (5.0) before the hole, and the new edge the first within that span after it, because a position message often arrives after altitude and speed. Implied speed and the time-for-a-stop test use those samples' times. Round 2 found 15% of cruise holes had a blank position right at the edge.
+
 The lookahead closes a false join: at `X, hole, blank, Y`, the blank first sample
 agrees with anything, and A9's own callsign break does not fire at Y because X is
 hours old. A callsign first appearing later than the lookahead still slips through.
@@ -185,8 +187,9 @@ the fix is a follow-up with its own `version`.
 
 ### Acceptance gates (author's call)
 
-Stage 1 picks the recommended set: the grid point with the most flights in one track
-subject to, pooled over both days and also reported per day:
+Stage 1 picks the recommended set: the grid point with the most flights crossing the
+European box in one track, then the most flights in one track overall, then the more
+conservative settings, subject to, pooled over both days and also reported per day:
 
 - negative-control false-join upper bound at most 1% overall,
 - at most 5% in the same-callsign stratum, among gaps the point allows,
