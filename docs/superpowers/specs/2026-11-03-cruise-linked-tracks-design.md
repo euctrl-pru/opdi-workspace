@@ -64,7 +64,7 @@ it. **All** of these must hold, and a NULL in any required input means not linka
 | Cruise at the old edge | min altitude of the 5 samples before the gap `>=` floor | `link_cruise_floor_ft` 25000.0 |
 | Cruise at the new edge | min altitude of the first 5 samples from the gap on `>=` floor | same |
 | Not descend-then-climb | NOT (mean vert. rate before `< -r` AND mean after `> +r`). NULL vert. rate is neutral, because ADS-B sends it in separate messages | `link_edge_vert_rate_fpm` 500.0 |
-| Callsign agrees | the last debounced callsign before the gap and the first non-blank callsign within the lookahead after it are not both non-blank and different. All blank is neutral. No bound looking back | `link_callsign_lookahead_minutes` 10.0 |
+| Callsign agrees | the last debounced callsign before the gap and the first non-blank callsign within the lookahead after it are not both non-blank and different. All blank is neutral. A callsign older than the lookback counts as blank, so two days' reads always decide alike | `link_callsign_lookahead_minutes` 10.0, `link_callsign_lookback_minutes` 60.0 |
 | Implied speed not too slow | `gc_nm / (gap/60) >= floor` | `link_min_implied_speed_kt` 315.0 |
 | Implied speed not impossible | `gc_nm / (gap/60) <= cap`. Above this is a duplicate address, not wind | `link_max_implied_speed_kt` 750.0 |
 | Not slow for this flight | implied speed `>=` ratio x edge ground speed, where edge speed is the mean over the 5 samples before the gap. Off at 0.0 | `link_min_speed_ratio` 0.0 |
@@ -94,9 +94,9 @@ inside D, then D sees a new track and claims it, while D-1 claims the same sampl
 inside the linked track. Samples are published twice under two ids.
 
 So under A10, `process_day` must use a lookback of at least
-`ceil(link_max_gap_minutes / 60) + 1` hours, which is 7 h at the default. An explicit
+`ceil(link_max_gap_minutes / 60) + ceil(link_callsign_lookback_minutes / 60)` hours, which is 7 h at the default. An explicit
 smaller `lookback_hours` raises. Other arms keep 3 h. Lookahead stays 24 h: a track
-over it is already reported by `tracks_touching_window_end`.
+over it is reported by `tracks_touching_window_end`, whose margin widens to `link_max_gap_minutes` under A10, because a hole straddling the read end leaves the last sample far from the edge.
 
 Step 01 reads the whole of D-1, D and D+1, so ingestion already covers this.
 
