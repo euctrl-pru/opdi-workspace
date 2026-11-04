@@ -65,10 +65,10 @@ it. **All** of these must hold, and a NULL in any required input means not linka
 | Cruise at the new edge | min altitude of the first 5 samples from the gap on `>=` floor | same |
 | Not descend-then-climb | NOT (mean vert. rate before `< -r` AND mean after `> +r`). NULL vert. rate is neutral, because ADS-B sends it in separate messages | `link_edge_vert_rate_fpm` 500.0 |
 | Callsign agrees | the last debounced callsign before the gap and the first non-blank callsign within the lookahead after it are not both non-blank and different. All blank is neutral. A callsign older than the lookback counts as blank, so two days' reads always decide alike | `link_callsign_lookahead_minutes` 10.0, `link_callsign_lookback_minutes` 60.0 |
-| Implied speed not too slow | `gc_nm / (gap/60) >= floor` | `link_min_implied_speed_kt` 315.0 |
-| Implied speed not impossible | `gc_nm / (gap/60) <= cap`. Above this is a duplicate address, not wind | `link_max_implied_speed_kt` 750.0 |
+| Implied speed not too slow | `gc_nm / (position_gap/60) >= floor` | `link_min_implied_speed_kt` 315.0 |
+| Implied speed not impossible | `gc_nm / (position_gap/60) <= cap`. Above this is a duplicate address, not wind | `link_max_implied_speed_kt` 750.0 |
 | Not slow for this flight | implied speed `>=` ratio x edge ground speed, where edge speed is the mean over the 5 samples before the gap. Off at 0.0 | `link_min_speed_ratio` 0.0 |
-| No time for a stop | `gap - gc_nm / V_fast * 60 < link_min_stop_minutes`, with `V_fast` the fastest plausible ground speed. Off at 0.0 | `link_min_stop_minutes` 0.0, `link_vfast_kt` 650.0 |
+| No time for a stop | `position_gap - gc_nm / V_fast * 60 < link_min_stop_minutes`, with `V_fast` the fastest plausible ground speed. Off at 0.0 | `link_min_stop_minutes` 0.0, `link_vfast_kt` 650.0 |
 | Real address | `icao24` not `000000`, `000001`, `ffffff` | constant |
 
 Edge positions read through blank samples: the old edge is the last non-blank position within `link_edge_position_minutes` (5.0) before the hole, and the new edge the first within that span after it, because a position message often arrives after altitude and speed. Implied speed and the time-for-a-stop test use those samples' times. Round 2 found 15% of cruise holes had a blank position right at the edge.
@@ -96,7 +96,7 @@ inside D, then D sees a new track and claims it, while D-1 claims the same sampl
 inside the linked track. Samples are published twice under two ids.
 
 So under A10, `process_day` must use a lookback of at least
-`ceil(link_max_gap_minutes / 60) + ceil(link_callsign_lookback_minutes / 60)` hours, which is 7 h at the default. An explicit
+`ceil(link_max_gap_minutes / 60) + ceil(max(link_callsign_lookback_minutes, link_edge_position_minutes) / 60)` hours, which is 7 h at the default. An explicit
 smaller `lookback_hours` raises. Other arms keep 3 h. Lookahead stays 24 h: a track
 over it is reported by `tracks_touching_window_end`, whose margin widens to `link_max_gap_minutes` under A10, because a hole straddling the read end leaves the last sample far from the edge.
 
