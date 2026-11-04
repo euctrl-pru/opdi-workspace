@@ -78,6 +78,15 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
   `track-construction-v3/` (the A9 investigation; commit 8bd2f30). **The
   track-construction-v3 paper still describes A9 as available-but-not-default
   and needs a follow-up render to reflect the promotion.**
+  **A10 `cruise_linked` exists and is not the default**: `standard` still resolves
+  to `debounced`. It is A9 plus one change: a gap over 30 min does not break when
+  both edges fit one continuous flight (`link_*` fields of `SegmentationConfig`). It
+  reads 11 h back rather than 3, raises on a shorter explicit `lookback_hours`, and
+  its truncation warning is wider. Promoting it would break three things: a further
+  silent `track_id` boundary, level segments that span a hole, and cumulative
+  distance that comes up short across one. The last two are detector fixes, each
+  with its own `version`, not yet designed. See
+  `opdi-portal/papers/track-construction-v4/`.
 - **ADS-C is a second source, off by default.** `AdscConfig.enabled`
   (`src/opdi/config.py`) unions OpenSky's ADS-C topic
   (`s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro`, hourly
@@ -191,7 +200,7 @@ Also: `AP_C_RWY` (runway), `AP_C_STND` (stand), `C40_/C100_CROSS_{TIME,LAT,LON,F
 
 The two winning solutions are the best available evidence on ADS-B cleaning. Key results:
 
-**Worth porting** — dedup on `(track_id, timestamp)`; lat/lon range checks; **stale-broadcast removal** (ADS-B updates position and velocity in separate message types, so identical consecutive values mean *repeated*, not *measured*); **derivative spike filtering with a ≥2-vote kill rule** (a point dies only if it participates in ≥2 flagged derivative windows, which targets the middle of a spike while sparing legitimate step changes); isolated-point removal at 20 s; gap segmentation at 5 min.
+**Worth porting** — dedup on `(track_id, timestamp)`; lat/lon range checks; **stale-broadcast removal** (ADS-B updates position and velocity in separate message types, so identical consecutive values mean *repeated*, not *measured*); **derivative spike filtering with a ≥2-vote kill rule** (a point dies only if it participates in ≥2 flagged derivative windows, which targets the middle of a spike while sparing legitimate step changes); isolated-point removal at 20 s. **Unverified:** "gap segmentation at 5 min" was listed here as a finding, but the research report behind `track-construction-v4` (`docs/superpowers/research/linking-fragmented-flight-trajectories.md`) could not find it in either winner's active code, so do not cite it as evidence until someone does.
 
 **Documented negative results — do not implement:**
 - Synthetic gap filling: *"Attempts to complete the trajectory always lead to worse result"* (2025 report §7).
