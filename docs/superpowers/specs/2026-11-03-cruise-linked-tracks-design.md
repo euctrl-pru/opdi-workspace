@@ -73,6 +73,8 @@ it. **All** of these must hold, and a NULL in any required input means not linka
 
 Edge positions read through blank samples: the old edge is the last non-blank position within `link_edge_position_minutes` (5.0) before the hole, and the new edge the first within that span after it, because a position message often arrives after altitude and speed. Implied speed and the time-for-a-stop test use those samples' times. Round 2 found 15% of cruise holes had a blank position right at the edge.
 
+With `link_directional_edges` on, an edge below the floor also passes if its direction fits one flight: the old edge climbing, or the new edge descending. A NULL vertical rate does not pass this alternative. It exists because flights often reappear on approach to their destination.
+
 The lookahead closes a false join: at `X, hole, blank, Y`, the blank first sample
 agrees with anything, and A9's own callsign break does not fire at Y because X is
 hours old. A callsign first appearing later than the lookahead still slips through.
@@ -193,7 +195,7 @@ conservative settings, subject to, pooled over both days and also reported per d
 
 - negative-control false-join upper bound at most 1% overall,
 - at most 5% in the same-callsign stratum, among gaps the point allows,
-- false joins at most 1% of real linked holes with a known label.
+- false joins at most 0.1% of real linked holes with a known label. It was 1%, tightened after round 3 showed 1% could not separate settings, and the paper says so.
 
 A same-callsign stratum under 60 controls cannot reach 5% even at zero joins. It reads
 "insufficient", does not fail the point, and marks the recommendation provisional.
