@@ -90,6 +90,8 @@ New fields go on both `SegmentationParams` and `SegmentationConfig`, because
 which handles NULL correctly. The callsign logic is extracted from `debounced`, not
 copied, so A9 and A10 share one definition.
 
+**Final defaults from the study:** floor 18,000 ft, minimum implied speed 400 kt, longest hole 600 min, speed ratio and time-for-a-stop off, direction-aware edges off.
+
 ## The midnight duplicate
 
 Day D reads from `D - DEFAULT_LOOKBACK_HOURS` (3 h) and claims tracks starting in D.
