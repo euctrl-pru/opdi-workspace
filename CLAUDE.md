@@ -80,7 +80,12 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
   and needs a follow-up render to reflect the promotion.**
   **A10 `cruise_linked` exists and is not the default**: `standard` still resolves
   to `debounced`. It is A9 plus one change: a gap over 30 min does not break when
-  both edges fit one continuous flight (`link_*` fields of `SegmentationConfig`). It
+  both edges fit one continuous flight (`link_*` fields of `SegmentationConfig`).
+  Edge altitude, vertical rate and speed read past blank samples within 5 min of the
+  hole. `link_old_edge_climb` is on (provisional: 0 false joins of 185 checkable holes,
+  under the 300 wanted, and 6 of 82,974 hidden landings joined, all same or blank
+  callsign) and `link_new_edge_descent` is off (it failed its own limit, 3 of 119).
+  Crossing flights in one track: 25.3% under A9, 80.7% under A10. It
   reads 11 h back rather than 3, raises on a shorter explicit `lookback_hours`, and
   its truncation warning is wider. Promoting it would break three things: a further
   silent `track_id` boundary, level segments that span a hole, and cumulative
