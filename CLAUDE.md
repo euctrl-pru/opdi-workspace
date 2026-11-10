@@ -55,43 +55,54 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
   **New config thresholds go in aviation units, with the unit in the field name** (`baro_altitude_d1_max_ft_s`, not a converted SI constant). Where a threshold must meet SI data, scale the *comparison*, not the stored value — `cleaning/native.py:AVIATION_UNIT_FACTOR` is the pattern, and it works there because the output is a NULL mask, which carries no unit. Reuse the constants above rather than introducing new ones, so the two can never drift. Getting units wrong is the most likely source of a silent bug: a threshold 3.28× too large simply never fires.
 - **Do not convert the storage layer to aviation units.** `track_gap_low_altitude_meters` feeds the gap family of segmentation rules, whose thresholds are a published contract; changing it breaks `track_id` continuity with data published under those thresholds. The `osn_tracks` DDL comments are also a published contract.
 - **Track identity is a versioned choice, not a frozen rule.** The default
-  segmentation is now A9 `debounced` (`callsign_min_persistence_seconds = 30`),
-  selected through `src/opdi/pipeline/segmentation/`. A9 is A8 plus one guard:
-  it treats a callsign change as real only if the new value persists for 30 s
-  before the next transition, so a callsign flickering to a garbled value and
-  back (X→Y→X) no longer splits one flight into several. Measured: 23.1% of A8's
-  track boundaries traced to a flicker leg; A9 gives ~19% fewer tracks,
-  merge-neutral against A8. The `method` value `standard` is a **pointer to the
-  current production arm** and now resolves to `debounced`; it resolved to A8
-  `recommended` between 2026-08-27 and this change. **Two `track_id` boundaries
-  now exist, and both are silent to a joiner (empty join, not an error):**
-  (1) at 2026-08-27, legacy → A8, when the `_{year}_{month}` suffix vanished and
-  ids became `{hash}_{offset}`; (2) at this change, A8 → A9, when the debounce
-  altered which samples share an id. Prior rules stay reachable for
-  reproduction under their own names: `recommended` is A8 (it ignores the
-  persistence field), `legacy` is the pre-2026-08-27 rule. A9 at
-  `callsign_min_persistence_seconds = 0` is textually identical to A8, so
-  zeroing it is an alternative way to reproduce A8 by config. Nothing in the
-  published data says which rule produced a row — `osn_tracks` has no version
-  column — so a consumer comparing across either boundary must be told. See
-  `opdi-portal/papers/track-construction-v1/` (legacy → A8) and
-  `track-construction-v3/` (the A9 investigation; commit 8bd2f30). **The
-  track-construction-v3 paper still describes A9 as available-but-not-default
-  and needs a follow-up render to reflect the promotion.**
-  **A10 `cruise_linked` exists and is not the default**: `standard` still resolves
-  to `debounced`. It is A9 plus one change: a gap over 30 min does not break when
-  both edges fit one continuous flight (`link_*` fields of `SegmentationConfig`).
-  Edge altitude, vertical rate and speed read past blank samples within 5 min of the
-  hole. `link_old_edge_climb` is on (provisional: 0 false joins of 185 checkable holes,
-  under the 300 wanted, and 6 of 82,974 hidden landings joined, all same or blank
-  callsign) and `link_new_edge_descent` is off (it failed its own limit, 3 of 119).
-  Crossing flights in one track: 25.3% under A9, 80.7% under A10. It
-  reads 11 h back rather than 3, raises on a shorter explicit `lookback_hours`, and
-  its truncation warning is wider. Promoting it would break three things: a further
-  silent `track_id` boundary, level segments that span a hole, and cumulative
-  distance that comes up short across one. The last two are detector fixes, each
-  with its own `version`, not yet designed. See
-  `opdi-portal/papers/track-construction-v4/`.
+  segmentation is A10 `cruise_linked` (since 2026-11-09, branch
+  `track-construction-v5`), selected through `src/opdi/pipeline/segmentation/`.
+  A10 is A9 `debounced` plus one change: a silence over 30 min (a **hole**)
+  does not end a track when the samples either side of it (its **edges**) fit
+  one continuous flight -- both edges at or above 18,000 ft, or the old edge
+  still climbing, or the new edge descending (above 5,000 ft, on >= 3 vertical
+  rates); straight-line speed across the hole 400-750 kt, hole at most 600 min,
+  callsigns not both present and different, no descent-then-climb, no
+  placeholder `icao24`. **Descent was off in v4** on 3 false joins in 119
+  checkable holes; v5 found all three were NM *estimated* arrival times at
+  Seoul minutes before ADS-B still showed the aircraft airborne, and the study
+  truth no longer counts events at aerodromes outside the European box (NM
+  times there are estimates) -- 0 false joins in 117 since. Edge values are read past blank samples within
+  5 min. Measured over two days against Network Manager: flights crossing the
+  edge of the European box in one track 25% -> ~80%, false joins ~0.05% of
+  checkable linked holes; see `opdi-portal/papers/track-construction-v5/`
+  (v4 is the proposal and is frozen). A10 also forgets a callsign not heard
+  for longer than 600 min (`methods.callsign_memory_minutes`), so two day-runs
+  judge a flicker after a hole alike; A9 by name keeps its unbounded memory.
+  The `method` value `standard` is a **pointer to the current production arm**
+  and resolves to `cruise_linked`; it resolved to `debounced` between the A9
+  promotion and 2026-11-09, and to A8 `recommended` between 2026-08-27 and
+  the A9 promotion. **Three `track_id` boundaries now exist, and all are silent
+  to a joiner (empty join, not an error):** (1) 2026-08-27, legacy -> A8, when
+  the `_{year}_{month}` suffix vanished; (2) A8 -> A9, the debounce; (3)
+  2026-11-09, A9 -> A10, one id where there were two across a linked hole.
+  Prior rules stay reachable under their own names (`debounced`,
+  `recommended`, `legacy`). Nothing in the published data says which rule
+  produced a row -- `osn_tracks` has no version column.
+  **Consequences of A10 inside the pipeline:** a day's run reads 11 h back
+  instead of 3 (`tracks.required_lookback_hours`); a track can hold a hole, so
+  detectors that pair or interpolate samples (level segments, flight-level and
+  ring crossings) work per **piece** -- the samples between holes --
+  via `pipeline/holes.py` and `EventConfig.track_hole_seconds` (1800, equal to
+  the segmentation gap on purpose, so a track without a hole gives the events it
+  always gave); per-track facts (first/last seen, tops, runway and block
+  milestones, the flight list) stay per track. Cumulative distance is
+  `distance_v0.0.3`: it reads from the last *known* position (the released
+  `distance_v0.0.2` zeroed two segments around every position cleaning had
+  blanked, ~14% of all distance on 2026-06-14, unrelated to holes) and adds the
+  straight line across a hole; `EventConfig.legacy()` keeps v0.0.2 -- and a
+  level-off event's `info.distance_nm` moves with it on every track with a
+  blanked position (types and times do not). The flight
+  list names the aerodrome actually ranked first (it used `first()` over an
+  unordered group, wrong ~1% of the time once a task holds 128+ groups), exact
+  ties go to the identifier, and a day run always rebuilds its endpoint
+  candidates. **The track-construction-v3 paper still describes A9 as
+  available-but-not-default and needs a follow-up render.**
 - **ADS-C is a second source, off by default.** `AdscConfig.enabled`
   (`src/opdi/config.py`) unions OpenSky's ADS-C topic
   (`s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro`, hourly
@@ -218,6 +229,12 @@ The two winning solutions are the best available evidence on ADS-B cleaning. Key
 
 - `opdi/sql/create_tables_*.sql` creates `opdi_flight_list_v2`, but all Python uses `opdi_flight_list`. The SQL is stale.
 - `opdi/docs/pipeline_overview.rst` misdescribes the phase algorithm (says "vertical-rate thresholds"; it is fuzzy logic), the measurements (says "between consecutive events"; they are cumulative from track start), and the track grouping key.
+- Event `info` is order-dependent in two places (found 2026-11-10 by the v5
+  consistency check: 4,126 of 15,032 identical tracks differed in `info`
+  only): the HexAero layout detector names one of several *overlapping*
+  taxiway/stand polygons by row order (`osm_id`/`osm_ref` differ between two
+  runs of the same code), and two FL crossings in the same second can swap
+  `crossing_seq`. Types and times are deterministic.
 - `opdi_h3_airspace_ref` is generated by step 00c and **read by nothing** — no airspace/FIR events exist.
 - ~~`opdi` has **no tests**~~ — **out of date.** `opdi` has a real suite (260
   tests as of 2026-08-23) under `tests/`, run with
