@@ -138,7 +138,10 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
   2024-12-26, the newest public cycle)** through h3's integer API (about 1.1 M
   cells, 5 min), splitting antimeridian polygons, dropping `XXXX` and the
   `EGGX` rerouting row and merging same-code bands; the earlier port
-  overwrote the table once per polygon. The detector finds a sample's volume
+  overwrote the table once per polygon; **a warehouse that still holds that
+  old table (columns `h3_res_7*`, no `h3_cell`) must have it dropped before
+  step 00c runs**, which refuses to write over it, and step 04 skips the FIR
+  family with a message until then. The detector finds a sample's volume
   from its res-7 cell's ancestors (bit arithmetic, broadcast joins per
   resolution, narrowest FL band wins an overlap), absorbs runs under 60 s,
   and emits one `xing-fir` per change with `fir_from`, `fir_to`, `fl` and

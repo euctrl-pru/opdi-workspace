@@ -366,6 +366,12 @@ the FIR definition caveat.
 - The holding windows are differences of running sums at a row offset rather than
   time-bounded sliding frames: Spark re-aggregates a sliding frame for every row, and
   step 04 took 3.3 times longer with the families on in the first run.
+- The holding altitude test is the sum of absolute altitude changes inside the window,
+  not the spread: a climb or a descent through the window fails either, and the sum is
+  a difference of running sums.
+- The FIR lookup walks the ancestors down to resolution 0 (compacted ocean FIRs store
+  whole base cells); a crossing is a change between consecutive *known* runs, so a
+  stretch with no volume (altitude masked) in the middle does not hide it.
 - Holding ships on although EGLL precision (0.71) misses the pre-set 0.75: the two-airport
   score (0.76 / 0.72 / 0.74) is level with the published detector's and the user asked for
   production; the paper states the miss.
