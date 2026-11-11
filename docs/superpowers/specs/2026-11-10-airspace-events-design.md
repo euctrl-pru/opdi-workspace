@@ -102,6 +102,8 @@ into several sub-volumes.
 
 ## The design
 
+(Curation note: the merge-point coordinates were in the end taken from state AIPs where reachable and otherwise from an open mirror of X-Plane navigation data derived from a commercial database; see the ruling in the execution ledger and `src/opdi/reference/data/README.md`.)
+
 ### A shared mechanism: per-family versions and extra measurements
 
 Today every event gets `version = events_v0.3.0` at stamping time and exactly two measurements
@@ -347,6 +349,26 @@ the FIR definition caveat.
 6. **Merge-point coordinates.** Published navigation fixes are facts from state AIPs, which states
    publish under ICAO Annex 15; AIP is the first source, open fix data (X-Plane Gateway) the second,
    and every row records its source. Nothing from a commercial navigation database is used.
+
+## What the measurements changed (execution notes, 2026-11-11)
+
+- The point-merge gate compared two different quantities: the published 42% is the share
+  of Dublin arrivals that *enter* the procedure, most of which are then cleared direct
+  without flying a leg (82% at Oslo in the one study that measured it), while this family
+  reports arrivals that flew at least 90 s of leg. The usage share is therefore reported
+  but not used as a gate; the visual check (detections judged real) is.
+- The straight "direct-to" alignment is information, not a gate: Dublin's runway 10
+  turn-in is a curve to the fix and the 5-degree gate lost every one of those legs. A leg
+  counts when the track reaches the merge point within 3 NM from a leg at least 6 NM out.
+- Holding and point merge read the last known heading and speed within the piece,
+  because cleaning blanks heading, speed and vertical rate together on every repeated
+  broadcast, i.e. on every straight stretch.
+- The holding windows are differences of running sums at a row offset rather than
+  time-bounded sliding frames: Spark re-aggregates a sliding frame for every row, and
+  step 04 took 3.3 times longer with the families on in the first run.
+- Holding ships on although EGLL precision (0.71) misses the pre-set 0.75: the two-airport
+  score (0.76 / 0.72 / 0.74) is level with the published detector's and the user asked for
+  production; the paper states the miss.
 
 ## Left to the builder
 
