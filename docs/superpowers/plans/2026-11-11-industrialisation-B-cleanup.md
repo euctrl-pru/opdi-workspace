@@ -20,6 +20,7 @@
 - Public import paths that exist today keep working (re-exports).
 - No Claude attribution in commits.
 - The baseline has nine known failing tests unrelated to this work (portal lookup from a worktree ×2, airport layout writer ×2, `regenerate_track_v2` ×2, events labelling helper import, flight detection border wiring, flight list v7 redirect); a stage passes when the failure set is a subset of these.
+- Writing style (owner's rule): every text is well structured and readable without background knowledge; readers are researchers and students. Define each term on first use, ordinary words, short sentences, units on numbers. No AI or internal wording: not "gate", "guard", "rung", "ladder", "arm", "pin", "load-bearing", "surface" as a verb, "robust", "leverage".
 
 ## Review Focus
 

@@ -21,6 +21,7 @@
 - Community page: file kept, not in the sidebar, no card on the home page, no links to it.
 - Not merged to `main`. No Quarto or R installation. No Claude attribution in commits.
 - Do not change the content of the study papers under `papers/` except `papers/index.qmd` listings.
+- Writing style (owner's rule): every text is well structured and readable without background knowledge; readers are researchers and students. Define each term on first use, ordinary words, short sentences, units on numbers. No AI or internal wording: not "gate", "guard", "rung", "ladder", "arm", "pin", "load-bearing", "surface" as a verb, "robust", "leverage".
 
 ## Review Focus
 

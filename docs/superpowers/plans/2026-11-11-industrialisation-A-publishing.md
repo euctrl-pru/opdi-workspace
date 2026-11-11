@@ -22,6 +22,7 @@
 - Published data is served through Trino: table and view definitions ship in `src/opdi/sql/trino/`.
 - Native Spark in the pipeline; no new executor dependency. Airflow is optional (`opdi[airflow]`) and never imported by the package core. Only Airflow 2.7.2 core operators.
 - No Claude attribution in commits. Docstrings in plain language for OPDI users, no development history.
+- Writing style (owner's rule): every text is well structured and readable without background knowledge; readers are researchers and students. Define each term on first use, ordinary words, short sentences, units on numbers. No AI or internal wording: not "gate", "guard", "rung", "ladder", "arm", "pin", "load-bearing", "surface" as a verb, "robust", "leverage".
 
 ## Review Focus
 
