@@ -252,3 +252,30 @@ download pages are replaced by the daily layout, with the v0.0.2 archive linked 
 
 Exact module names inside the `config/` package, the figure style, the wording of each page, the
 retry counts, and which study scripts need which moved variant (found by running the study tests).
+
+## Answers to the builder check
+
+Defaults the plan is built on; the first four await the owner's confirmation and each changes one task.
+
+1. **The v0.0.2 monthly release path stays.** The `dev`/`live` environments (Azure, Iceberg, Hive) and
+   the old export steps keep working with unchanged behaviour; they are tidied cosmetically and
+   documented as the v0.0.2 release path. The new publishing step gets its own step id (`09`).
+2. **Download location is one setting.** `PUBLISHED_BASE_URL` in `opdi.published` and one value in the
+   portal's `R/portal_config.R`; default placeholder
+   `https://www.eurocontrol.int/performance/data/download/OPDI/v2.0.0/`, with the OpenSky S3 path
+   documented as the alternative.
+3. **Production root is a clean prefix.** Nothing existing is deleted or moved. With the warehouse
+   `s3a://eurocontrol/opdi`, the release root is `<warehouse>/v2.0.0/` (internal tables, `_state/`,
+   `published/`, its own coverage marker). `opdi-prod` and `opdi-world` are left for the owner.
+   `OPDI_WAREHOUSE` selects the warehouse for every coverage; the environment variable a pod may still
+   export is reported at start-up so a wrong target is visible before anything is written.
+4. **Airflow tasks are shell commands.** BashOperator running `python -m opdi.orchestration ...` behind a
+   configurable command prefix (virtualenv, container, or a hop to the pod that hosts the Spark
+   driver); credentials from the environment or an Airflow Connection. Only core Airflow 2.7.2 operators.
+5. **Daily lag** is two days by default (`lag_days`), because a day needs the following day's data.
+6. **Classic views** reproduce the v0.0.2 file schemas (upper-case flight-list names, `id`,
+   `event_id`, measurement `type` strings); measurement ids are rebuilt as the event id plus the
+   documented suffix and measurement versions come from the declared schema.
+7. **Portal "current release"** is one switch in `portal_config.R` (`current_release`): v2.0.0 is
+   presented as the new release, v0.0.2 stays downloadable, and the switch flips when the backfill is done.
+8. **2026 challenge facts** come from the sourced research notes; unconfirmed totals are left out.
