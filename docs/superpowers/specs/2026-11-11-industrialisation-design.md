@@ -279,3 +279,17 @@ Defaults the plan is built on; the first four await the owner's confirmation and
 7. **Portal "current release"** is one switch in `portal_config.R` (`current_release`): v2.0.0 is
    presented as the new release, v0.0.2 stays downloadable, and the switch flips when the backfill is done.
 8. **2026 challenge facts** come from the sourced research notes; unconfirmed totals are left out.
+
+## Owner's answers to the four open points (2026-11-11)
+
+1. The v0.0.2 monthly release is **no longer produced**. The old export steps (05, 06), the monitoring
+   steps tied to them, and the Azure `dev`/`live` environments leave the package. The v0.0.2
+   *algorithms* stay reproducible through the presets. Supersedes answer 1 above.
+2. Published data is accessed through **Trino** (the OpenSky Trino instance, and a Trino file browser
+   whose URL is to be defined). The virtual views are Trino definitions: external tables over the
+   published folders and views for the classic shapes. The Python/DuckDB reader remains as the route
+   for downloaded files; its base URL is a placeholder setting. Supersedes answer 2 above.
+3. `eurocontrol/opdi`, `opdi-prod` and `opdi-world` may be deleted by the owner once nothing needed
+   remains there; the work ends with the exact commands and a list of what was checked.
+4. The Airflow workers' environment is unknown; the configurable command prefix stays and the
+   requirements are documented.
