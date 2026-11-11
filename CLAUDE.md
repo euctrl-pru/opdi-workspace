@@ -35,7 +35,7 @@ Beside it, `events_v0.2.0` retires `take-off`/`ATOT`/`ALDT`/`AOBT`/`AIBT`/`entry
 
 ## Pipeline layout (`opdi/`)
 
-No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `python opdi.py`, or `run_pipeline()`:
+A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `python opdi.py`, or `run_pipeline()`. One (step, day) unit is also a command (`python -m opdi.orchestration {reference|step|day|check-space|prune|plan}`), which is all the Airflow 2.7.2 DAGs in `opdi/airflow/dags/opdi_pipeline.py` call (`opdi_daily`, `opdi_backfill`; the DAG file never imports `opdi`, see `opdi/airflow/README.md`):
 
 | Step | Module | Does |
 |---|---|---|
@@ -44,9 +44,16 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
 | 02 | `pipeline/tracks.py` | Track splitting, H3 indexing, altitude cleaning |
 | 03 | `pipeline/flights.py` | Flight list — ADEP/ADES detection |
 | 04 | `pipeline/events.py` | Event + measurement extraction |
-| 05–08 | `output/`, `monitoring/` | Parquet export, cleanup, stats |
+| 04b | `pipeline/flight_list_milestones.py` | Milestone columns on the flight list |
+| 09 | `output/published.py` | Publish the day: one flight-list file, one merged flight-events file, monthly index, catalogue |
 
-**Environments** (`src/opdi/config.py`): `dev` / `live` use Iceberg-on-Hive over Azure ADLS with Kerberos; `local` uses Spark-native Iceberg; **`opensky` uses neither Hive nor Iceberg** — plain parquet over S3A at `s3a://eurocontrol/opdi`, optionally on Kubernetes. `utils/storage.py` `StorageManager` is the switch (`use_s3 = not enable_iceberg`).
+Steps 05–08 (monthly v0.0.2 exporters, monitoring) were removed on 2026-11-11: the v0.0.2 monthly release is no longer produced.
+
+**Environments** (`src/opdi/config/`, a package since 2026-11-11; every name still imports from `opdi.config`): `opensky` (default; plain parquet over S3A, optionally on Kubernetes) and `local` (Spark-native Iceberg, used by the tests). The Azure `dev` / `live` environments were removed. `utils/storage.py` `StorageManager` is the switch (`use_s3 = not enable_iceberg`).
+
+**Release v2.0.0 and where data goes.** One warehouse setting (argument, else `OPDI_WAREHOUSE`, else `s3a://eurocontrol/opdi`), for both coverages; every table lives under the release root `<warehouse>/v2.0.0/` (`ProjectConfig.release`, `.release_root`); progress state under `<release root>/_state/`; published files under `<release root>/published/` (`flight_list/flight_list_YYYYMMDD.parquet`, `flight_events/flight_events_YYYYMMDD.parquet`, `index/flight_index_YYYYMM.parquet`, `catalogue.parquet`). A day's files hold the flights whose flight-list `DOF` is that day and all their events. The published columns are declared once in `src/opdi/output/schema.py`; the portal data dictionary and the Trino DDL (`src/opdi/sql/trino/`, rendered by `python -m opdi.sql.render`) are generated from it — change a column there, never in the generated files. `opdi.published` is a Spark-free reader (pandas/DuckDB) with views giving the classic separate `events` / `measurements` / `flight_list_v0` shapes. Study scripts that point `warehouse_path` at a complete prefix must set `cfg.project.release = ""`. Measured on 2026-06-14 worldwide: 175,615 flights, 6.77 M events, 7 MB + 411 MB published per day, about 1.3 GB of working tables per day (`prune --drop-published-working`, Airflow Variable `opdi_keep_working`).
+
+**The package keeps two behaviours only:** today's default (v2.0.0) and the presets reproducing v0.0.2 (`segmentation.method="legacy"`, `decimation="modulo"`, `DetectionConfig.legacy()`, `EventConfig.legacy()`). Every other variant (the segmentation rules `recommended`, `debounced`, ...; detection mode `nearest`; `trend_ooa`) lives in `opdi/benchmarks/study_variants/` and is registered by the study scripts (`register_study_arms()`); selecting one without registering raises a message naming the new home. `tests/test_golden_outputs.py` (reference files in `tests/golden/`, regenerate with `tools/make_golden.py`) compares every working and published table of a simulated day for both behaviours: a change that alters it changes published data. Tests of benchmark scripts are under `tests/benchmarks/`. Version strings are in `src/opdi/versions.py`. Code is ruff (E,F,W,I,N,D,B,UP, google docstrings) and black (line length 100) clean; `tests/test_docs_plain_language.py` rejects development history and internal wording in docstrings, comments and `readme.md` — docstrings are written for researchers and students who use the data, and link the portal methods pages (`opdi.PORTAL_URL`).
 
 ### Conventions that matter
 
@@ -281,15 +288,15 @@ The two winning solutions are the best available evidence on ADS-B cleaning. Key
 
 ## Known inconsistencies
 
-- `opdi/sql/create_tables_*.sql` creates `opdi_flight_list_v2`, but all Python uses `opdi_flight_list`. The SQL is stale.
-- `opdi/docs/pipeline_overview.rst` misdescribes the phase algorithm (says "vertical-rate thresholds"; it is fuzzy logic), the measurements (says "between consecutive events"; they are cumulative from track start), and the track grouping key.
+- **Take-off and landing merge order.** The default publishes the runway-pass time first (`acdm_first`) while the flight-events-v4 study found more times within 10 s with the climb-and-descent time first (30.9% / 41.1% against 24.7% / 25.5%); the portal page `methods/takeoff-landing` states both. Not changed: it would alter published times.
+- **Portal (`feature/new-topics`) has never been rendered** since the 2026-11 restructure (no Quarto/R on the pod). `tools/check_site.py` checks links, the nine-heading methods template, that every accuracy number on a methods page is a row of `assets/validation/validation_measures.csv`, and wording; `PUBLISHING_CHECKLIST.md` lists what the owner must supply. The community page is excluded from rendering until its members agree.
 - Event `info` is order-dependent in two places (found 2026-11-10 by the v5
   consistency check: 4,126 of 15,032 identical tracks differed in `info`
   only): the HexAero layout detector names one of several *overlapping*
   taxiway/stand polygons by row order (`osm_id`/`osm_ref` differ between two
   runs of the same code), and two FL crossings in the same second can swap
   `crossing_seq`. Types and times are deterministic.
-- `opdi_h3_airspace_ref` is generated by step 00c and **read by nothing** — no airspace/FIR events exist.
+- `opdi_h3_airspace_ref` (step 00c, both coverages) is read by the `xing-fir` detector (`pipeline/fir.py`).
 - ~~`opdi` has **no tests**~~ — **out of date.** `opdi` has a real suite (260
   tests as of 2026-08-23) under `tests/`, run with
   `.venv310/bin/python -m pytest tests/`. It uses a local Spark session via the
