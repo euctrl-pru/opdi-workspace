@@ -69,6 +69,8 @@ already on it); some go on to visualise or analyse **events**. Delivery is built
 - **The new release is called v2.0.0.**
 - Community page hidden for now.
 
+Approved by the owner on 2026-11-11 with the v2.0.0 naming and the indexing additions.
+
 ## My calls (open to correction)
 
 - **What "previous status quo" means (confirmed by the owner).** Only the v0.0.2 line was ever published. The package keeps
@@ -92,8 +94,7 @@ already on it); some go on to visualise or analyse **events**. Delivery is built
 - **File format and naming.** Parquet, zstd, one file per day:
   `<warehouse>/published/v2.0.0/flight_list/flight_list_YYYYMMDD.parquet` and
   `.../flight_events/flight_events_YYYYMMDD.parquet`. Written to a temporary key and renamed, so a
-  reader never sees a partial file. A `_SUCCESS`-style manifest row per day (row counts, versions,
-  pipeline commit) in `.../manifest/`.
+  reader never sees a partial file. The dataset catalogue records each published day.
 - **Views** are shipped as SQL for DuckDB (reads parquet over HTTPS/S3 directly) plus a small Python
   helper `opdi.published` with `read_flight_list`, `read_flight_events`, and `as_events()`,
   `as_measurements()` that return the classic shapes. Documented on the portal with copy-paste snippets
@@ -124,6 +125,15 @@ which cap at four months, write on the driver and overwrite versions).
   generated from the same declaration so the two cannot drift.
 - `publish_day(day)`: writes both files (single file each, temporary key then rename), then the
   manifest row. Idempotent; re-running replaces the day.
+- **Indexing (owner's request).** Parquet has no index; the published files carry the equivalents
+  readers use: (a) rows sorted (flight list by `adep`, `first_seen`; events by `flight_id`,
+  `event_time`) with row groups of about 100,000 rows so min/max statistics prune; (b) bloom filters
+  on `flight_id`, `icao24`, `flt_id`, `adep`, `ades` and event `type`; (c) a monthly flight index
+  `.../index/flight_index_YYYYMM.parquet` (`flight_id, icao24, flt_id, adep, ades, first_seen,
+  last_seen, dof, file`) rebuilt when a day of that month is published; (d) a dataset catalogue
+  `.../catalogue.parquet`, one row per published day (row counts, time span, versions, file sizes,
+  pipeline commit), which replaces the per-day manifest; (e) an `h3_res_5` column on every event for
+  regional filtering.
 - `opdi/published.py` (reader side, no Spark): pandas/pyarrow/duckdb helpers and the view SQL.
 - The internal `opdi_flight_events` and `opdi_measurements` tables remain the pipeline's working
   tables (step 04 is unchanged); they are not published.
