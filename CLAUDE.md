@@ -103,6 +103,57 @@ No Airflow. A plain step registry in `src/opdi/runner.py`, run via `opdi run`, `
   ties go to the identifier, and a day run always rebuilds its endpoint
   candidates. **The track-construction-v3 paper still describes A9 as
   available-but-not-default and needs a follow-up render.**
+- **Three navigation event families (2026-11), each with its own version.**
+  Step 04 emits `holding-start`/`holding-end` (`holding_v0.1.0`),
+  `pms-leg-entry`/`pms-leg-exit`/`pms-merge-point` (`pms_v0.1.0`) and
+  `xing-fir` (`fir_v0.1.0`), from `src/opdi/pipeline/{holding,point_merge,fir}.py`,
+  under the `navigation` progress group and the flags `emit_holding`,
+  `emit_point_merge`, `emit_fir_crossings` (all on; off under `legacy()`; V4
+  ladder rungs V10-V12). A detector may return a `version` column and step 04
+  stamps `coalesce(version, events_version)`, so `events_v0.3.0` and the ids of
+  the published types are untouched. Measurements beyond the two every event
+  gets come from `events.EXTRA_MEASURES` (an `info` field read as a measurement
+  row; holding duration/distance/circuits, point-merge leg time/distance/
+  direct-to distance). **Holding** is a signed cumulative turn over a 6 min
+  window (at least 300 degrees one way, within 8 NM, 15 NM flown, under
+  2,500 ft of altitude change), placed trailing, leading and centred,
+  computed as differences of running sums at a row offset because Spark
+  re-aggregates a sliding frame per row (the time-bounded version made step
+  04 3.3x slower). Scored against the hand-corrected 2019 labels (one day,
+  EGLL and EIDW): precision 0.76, recall 0.72, F1 0.74, level with the
+  published neural detector (0.84/0.70/0.76); EGLL alone 0.71/0.71/0.71.
+  **Point merge** needs merge-point coordinates: the curated table
+  `src/opdi/reference/data/point_merge_systems.csv` (61 catalogue airports,
+  54 placed, AIP where reachable else AIRAC 2406 navdata; see its README). A
+  leg is 90 s at constant distance in the published band moving across the
+  bearing, kept when the track then reaches the merge point within 3 NM;
+  the straight-direct alignment is `info.direct_aligned`, not a gate (Dublin
+  runway 10 turns in on a curve). On 2026-06-14 Dublin had 52 of 418
+  arrivals on a leg; 19 of 20 plotted detections were real. **Arrivals per
+  airport must be counted with an inbound `xing-40nm`, not from the flight
+  list's `ades`, which also names a trend-guessed destination for tracks that
+  never land** (22,926 "LFPG arrivals" on one day otherwise). **FIR**: step
+  00c (`reference/h3_airspaces.py`) now builds a compact worldwide H3 layer
+  from the PRU Atlas NM FIR polygons of **CFMU AIRAC 524 (valid 2024-11-28 to
+  2024-12-26, the newest public cycle)** through h3's integer API (about 1.1 M
+  cells, 5 min), splitting antimeridian polygons, dropping `XXXX` and the
+  `EGGX` rerouting row and merging same-code bands; the earlier port
+  overwrote the table once per polygon. The detector finds a sample's volume
+  from its res-7 cell's ancestors (bit arithmetic, broadcast joins per
+  resolution, narrowest FL band wins an overlap), absorbs runs under 60 s,
+  and emits one `xing-fir` per change with `fir_from`, `fir_to`, `fl` and
+  **the AIRAC cycle in every event**: the same definition is used for every
+  day, which is the limitation to know about. Vertical FIR-to-UIR crossings
+  are emitted too. Against exact point-in-polygon: 99.5% of samples agree,
+  crossing timing p90 10 s. Cleaning blanks heading, speed and vertical rate
+  together on a repeated broadcast, so holding and point merge read the last
+  known value within the piece. Step 04 on a worldwide day: 2,157 s with the
+  families off, 4,431 s on. Not yet verified: `xing-fir` against NM airspace
+  profiles (extractor `reference/extract_airspace_profiles.R`, laptop only;
+  scorer `benchmarks/fir_truth_score.py`), point merge at the Norwegian
+  sites (zero legs found) and at unplaced merge points. Paper:
+  `opdi-portal/papers/airspace-events-v1/`; spec and plan under
+  `docs/superpowers/{specs,plans}/2026-11-10-airspace-events*`.
 - **ADS-C is a second source, off by default.** `AdscConfig.enabled`
   (`src/opdi/config.py`) unions OpenSky's ADS-C topic
   (`s3a://readsb-aircraft-states/topics/readsb.aircraft.adsc.avro`, hourly
