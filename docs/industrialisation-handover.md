@@ -98,3 +98,50 @@ mc rm --recursive --force osn/eurocontrol/opdi/osn_symposium_paper_2026/
 ```
 
 `opdi-prod/` does not exist, so there is nothing to run for it.
+
+## Plausibility of milestones (added 2026-11-12)
+
+Plan: `docs/superpowers/plans/2026-11-12-milestone-plausibility.md`. Study note
+and data: `opdi-portal/papers/milestone-plausibility-v1/`. Portal page:
+`content/methods/plausibility-checks.qmd`.
+
+- **Block times are read from the ground.** An off-block time is the start of a
+  movement from a standstill before the take-off of its own leg; an in-block
+  time is the end of the last movement after the landing.
+- **Crossings over missing values** are placed between the last known value and
+  the current one, and are not given when those are more than 30 minutes apart.
+- **Five checks** remove an event only when known facts contradict it: no time;
+  a ground event while clearly flying; a take-off or landing time more than
+  1,500 ft above the airport; an off-block time not before its take-off; an
+  in-block time not after its landing. Removed events go to the working table
+  `opdi_flight_events_rejected` and are not published.
+- **The v0.0.2 settings are unchanged**: the three switches are off there.
+
+Measured on one worldwide day (14 June 2026) against airport records:
+
+| | Before | After |
+|---|---|---|
+| Off-block times placed in flight | 4,470 | 27 |
+| In-block times placed in flight | 2,934 | 106 |
+| Off-block times confirmed within 60 s | 2,167 | 2,172 |
+| In-block times confirmed within 60 s | 2,204 | 2,319 |
+| Take-off times confirmed within 60 s | 13,737 | 13,768 |
+| Landing times confirmed within 60 s | 15,746 | 15,750 |
+
+The checks removed 312 events that day and none that a record confirms. Five
+block times that matched a record before are no longer published; each was
+read individually and was placed while the aircraft was flying or on the
+take-off roll, so the match was by chance.
+
+Limits: one day and about 90 European airports; the height limit for take-off
+and landing times removed nothing on that day; landing events at the runway
+threshold above 500 ft are left as they are.
+
+## Processing time (measured, one worldwide day, eight executors)
+
+Step 03 takes 29 minutes and step 04 about 69 to 87 minutes, of which holding,
+point merge and FIR crossings are about 51 minutes. Steps 01, 02 and 02a were
+not timed on a full day. A whole day is roughly three to four hours, so the
+2025-2026 backfill run one day at a time is about three months. Speeding it up
+without changing results has been discussed and is waiting for the owner's
+go-ahead; nothing was started.
