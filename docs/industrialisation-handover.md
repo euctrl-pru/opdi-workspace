@@ -197,3 +197,53 @@ the new region and can be many minutes late; some flights gain a short
 separate piece made only of ADS-C reports; identifiers change where a track's
 start moves or tracks are joined or split; the Airflow run has no ADS-C step.
 Recommendation: keep ADS-C off in release v2.0.0. The setting was not changed.
+
+## Settings, a measured full day, and reliability (added 2026-11-15)
+
+**A whole worldwide day, measured.** 14 June 2026 was processed from the raw
+archive through `python -m opdi.orchestration day`, the command the Airflow
+DAGs use, with 13 executors:
+
+| Step | Seconds |
+|---|---|
+| 01 Ingest (one new day) | 384 |
+| 02 Tracks | 1,677 |
+| 02a Cleaning | 744 |
+| 03 Flight list | 356 |
+| 04 Events | 1,550 |
+| 04b Flight-list milestones | 79 |
+| 09 Publish | 209 |
+| Total | 4,999 (1.4 h); a second run took 5,117 |
+
+**Settings kept** (results identical): 13 executors instead of 12; 104 shuffle
+partitions; executors of 11 GiB heap plus 2,560 MiB of memory outside the
+heap; storage retries with a 120-second request timeout. Tried and not kept:
+Arrow-based Python functions, Kryo. The memory outside the heap had never
+reached the cluster before (it was only set for another environment), which
+is why every executor was killed for memory in the publishing step of each
+earlier full-day run.
+
+**Reliability.**
+- A step that fails for a passing reason (storage throttling, a lost
+  executor, a timeout) runs again, up to 2 times, 120 seconds apart. A full
+  bucket, an empty table, a schema error or a lack of memory stops at once
+  with the cause.
+- Step 04 survives a lost executor: what it keeps in memory is held twice.
+- A table folder left empty by a failed write is reported as empty.
+- A day of position reports counts as fetched only when its fetch is recorded
+  as finished.
+- Fault test: one executor was deleted during step 02 and one during step 04
+  of a full day. The day finished without a step retry, with results identical
+  to the undisturbed run, about 460 seconds later.
+- A day needs about 29 GB of temporary space; the run refuses to start with
+  less than 32 GB free.
+- What can still stop a day is listed in `opdi/airflow/README.md`; each case
+  stops with a message and the next run continues from the last finished step.
+
+**To check before the backfill.** The full day built from the raw archive has
+161,881 flights. The comparisons of the last weeks started from tracks stored
+on 17 October, which give 175,615. The difference sits at the ends of tracks
+and was not traced. The likely reason is that the stored tracks were built
+with the earlier track rule, before tracks were kept across long reception
+gaps; this should be confirmed. The numbers of the plausibility study and of
+the before/after comparisons were measured on those stored tracks.
