@@ -145,3 +145,55 @@ not timed on a full day. A whole day is roughly three to four hours, so the
 2025-2026 backfill run one day at a time is about three months. Speeding it up
 without changing results has been discussed and is waiting for the owner's
 go-ahead; nothing was started.
+
+## Rename, processing speed and ADS-C (added 2026-11-14)
+
+Plan: `docs/superpowers/plans/2026-11-13-rename-adsc-speed.md`. Study notes on
+the portal: `papers/processing-speed-v1/` and `papers/adsc-effect-v1/`.
+
+**Rename.** Under the default settings the runway threshold crossing is now
+the event `xing-runway-threshold`. The v0.0.2 settings keep their own
+`landing` event.
+
+**Processing time of one worldwide day (14 June 2026).**
+
+| Step | Before (8 executors) | After (12 executors) | Figure |
+|---|---|---|---|
+| 01 Ingest | 1,092 s | 396 s | scaled from a 4-hour slice |
+| 02 Tracks | 4,173 s | 2,133 s | scaled from one aircraft in 12 |
+| 02a Cleaning | 1,641 s | 1,225 s | scaled from one aircraft in 12 |
+| 03 Flight list | 940 s | 387 s | measured on the full day |
+| 04 Events | 4,687 s | 1,741 s | measured on the full day |
+| 04b Flight-list milestones | 196 s | 55 s | measured on the full day |
+| 09 Publish | 322 s | 246 s | measured on the full day |
+| Total | 13,051 s (3.6 h) | 6,183 s (1.7 h) | |
+
+- The one-hour target was not reached. About 120,000 executor-seconds of work
+  remain and the cluster quota allows 12 executors (24 cores). Getting under
+  one hour needs about twice the cores, or a track step that works
+  incrementally from day to day.
+- Steps 01 to 02a could not be timed on a full day: their output (about 20 GB)
+  does not fit in the bucket. A separate run ingested 72 hours of the archive
+  in 2,058 s, which suggests step 01 is nearer 690 s than 396 s per day.
+  Re-time these steps on a full day when the bucket has room.
+- Results are the same. Steps 03 to 09 on the full day: the same 175,615
+  flights and airports, all 6.74 million events equal on flight, type and
+  time, measurements equal. Steps 01, 02 and 02a on a slice and a sample:
+  every row and every column equal. Two runs of the same code now give
+  identical output, after two order-dependent choices were made fixed (which
+  taxiway, apron or stand an event names; the order of the list of other
+  candidate airports).
+- To look at: in one run of step 09, 13 executors were stopped for lack of
+  memory and Spark repeated their tasks. The output was correct, but the
+  publishing step may need more executor memory or smaller tasks.
+
+**ADS-C.** One day, the 1,884 aircraft with ADS-C, the pipeline run without
+and with those reports. With ADS-C: reference flights rebuilt as one track
+85.2% to 87.5%; flight time without any report 5,016 h to 4,131 h; flights
+with both airports right 900 to 902; published distance within 5% of the
+reference route 71.7% to 75.0%; no track holding two flights in either run.
+Against that: FIR crossings over the ocean are placed on the first report in
+the new region and can be many minutes late; some flights gain a short
+separate piece made only of ADS-C reports; identifiers change where a track's
+start moves or tracks are joined or split; the Airflow run has no ADS-C step.
+Recommendation: keep ADS-C off in release v2.0.0. The setting was not changed.
