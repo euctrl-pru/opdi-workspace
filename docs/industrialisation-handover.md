@@ -247,3 +247,43 @@ and was not traced. The likely reason is that the stored tracks were built
 with the earlier track rule, before tracks were kept across long reception
 gaps; this should be confirmed. The numbers of the plausibility study and of
 the before/after comparisons were measured on those stored tracks.
+
+## Track-step partitions and plausibility on current tracks (added 2026-11-15)
+
+**Track step.** With 104 shuffle partitions the track step wrote about 166 GB
+to the executors' local disk while sorting. With 416 it writes none and is
+about 9% faster (1,465 s against 1,613 s, mean of two runs each), with
+identical tracks. Only the track step uses 416; cleaning and events stay at
+104, where they are faster. The local disk is the node's own (527 GB, no
+per-pod limit); the peak use of one executor was about 12 GB, so there was no
+risk of eviction.
+
+**A full day in this session:** 01 383 s, 02 1,446 s, 02a 706 s, 03 344 s,
+04 1,519 s, 04b 48 s, 09 163 s; total 4,609 s (77 minutes).
+
+**Plausibility figures, re-measured on tracks built with the current rule**
+(161,881 flights on 14 June 2026; the earlier figures used tracks stored on
+17 October with the earlier rule, kept under
+`papers/milestone-plausibility-v1/data/tracks_of_17_october/`):
+
+| | Before | After |
+|---|---|---|
+| Off-block times placed in flight | 4,947 | 31 |
+| In-block times placed in flight | 3,127 | 111 |
+| Off-block times confirmed within 60 s | 2,169 | 2,173 |
+| In-block times confirmed within 60 s | 2,201 | 2,320 |
+| Take-off times confirmed within 60 s | 13,767 | 13,764 |
+| Landing times confirmed within 60 s | 15,752 | 15,752 |
+
+The checks removed 332 events and none that a record confirms.
+
+**Open defect: a take-off time placed on the landing roll.** On a track first
+received just after take-off, no report lies below 15 ft at the departure, so
+no take-off is found there. The track's take-off time then comes from the
+runway at the destination, where the landing roll is read as a departure,
+20 to 60 seconds after the landing. A take-off after the landing of the same
+track occurs on about 500 tracks a day; 8 take-off times that airport records
+confirmed before are wrong after for this reason. Not fixed: the detector
+needs to refuse a "departure" on a runway the same aircraft has just landed
+on. A simple check on the order of the two times was studied earlier and
+removes real cases (an arrival followed by a departure in one track).
