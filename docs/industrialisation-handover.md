@@ -277,13 +277,20 @@ risk of eviction.
 
 The checks removed 332 events and none that a record confirms.
 
-**Open defect: a take-off time placed on the landing roll.** On a track first
-received just after take-off, no report lies below 15 ft at the departure, so
-no take-off is found there. The track's take-off time then comes from the
-runway at the destination, where the landing roll is read as a departure,
-20 to 60 seconds after the landing. A take-off after the landing of the same
-track occurs on about 500 tracks a day; 8 take-off times that airport records
-confirmed before are wrong after for this reason. Not fixed: the detector
-needs to refuse a "departure" on a runway the same aircraft has just landed
-on. A simple check on the order of the two times was studied earlier and
-removes real cases (an arrival followed by a departure in one track).
+**A take-off time placed on the landing roll: corrected (2026-11-16).** After
+touchdown some reports flagged on the ground carry a height 20 to 60 ft above
+the airport, and the runway pass was read as a departure. A pass now counts
+as a take-off only if it ends in the air (setting
+`runway_take_off_needs_air_report`, off in the v0.0.2 settings). On the day:
+take-off times confirmed by airport records 13,764 to 13,782, no confirmed
+take-off, landing or block time lost; tracks with a take-off after their own
+landing 508 to 428 (the 80 removed were all landing rolls; the rest are
+turnarounds and touch-and-goes, and 8 landing rolls whose last reports were
+not flagged on the ground); 91 flights no longer have the destination as
+their departure airport. Three real circuit take-offs at small airfields lose
+their take-off events; none has an airport record.
+
+**To look at.** When publishing (step 09) runs in the same Spark session
+straight after the events step it can run short of memory in one task; run
+alone it passes. The Airflow path starts a new session per step, so it is not
+affected, but study scripts that chain steps in one session are.
