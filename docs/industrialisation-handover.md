@@ -294,3 +294,45 @@ their take-off events; none has an airport record.
 straight after the events step it can run short of memory in one task; run
 alone it passes. The Airflow path starts a new session per step, so it is not
 affected, but study scripts that chain steps in one session are.
+
+## Spot checks, corrections, accuracy per airport (added 2026-11-17)
+
+About 3,000 example events (50 for each of 63 items) from one worldwide day were read, the odd cases were reduced to shared causes, and the causes were corrected in six groups, merged, reviewed independently and fixed. Code: `opdi` branch `industrialisation` at `4b59a63`; portal: `feature/new-topics` at `396cf09`. The decisions are in `docs/superpowers/specs/2026-11-17-spot-check-corrections.md`, the plan in `docs/superpowers/plans/2026-11-16-spot-checks-accuracy-portal.md`, the way the corrections were measured in `opdi/benchmarks/CORRECTIONS.md`.
+
+**Result on three days (10, 14 and 17 June 2026, worldwide), against airport records and Network Manager flights:**
+
+| Item | Found among reference movements | Within 60 s (median) |
+|---|---|---|
+| Take-off time | 80.8% | 93.2% (21 s) |
+| Landing time | 81.7% | 94.5% (18 s) |
+| Off-block time | 35.0% | 40.3% (99 s) |
+| In-block time | 33.4% | 72.0% (34 s) |
+| Departure / destination airport | 85.9% / 78.5% | 98.6% / 98.5% equal |
+
+Before the corrections, on 14 June: off-block 34.4% within 60 s, in-block 31.7%, take-off runway equal to the record 87.4% (now about 97%), threshold crossings found for 7.5% of landings (now about 41%).
+
+**New version strings:** flight list v6.0.0, events_v0.4.0, holding / point merge / FIR v0.2.0, distance_v0.0.4, time_v0.0.2. Every correction is one config field, on by default and off in the v0.0.2 settings, whose golden output is byte-identical.
+
+**Cost:** on the full day the events step used 3.8% fewer executor-seconds than before the corrections and the three steps together 3.4% more; wall time about 11% longer. The review fixes added about 1% to the events step on the sample; this was not measured again on a full day in isolation.
+
+**Portal:** Algorithms (index and 26 item pages, each with its sources and short use cases), Limitations, and Accuracy and availability (overall, 100 busiest European airports, 100 busiest worldwide). All tables are generated from `assets/accuracy/*.csv` by `tools/gen_accuracy_tables.py` and `tools/gen_item_figures.py`. The site has not been rendered here (no Quarto).
+
+**Limits that remain (also on the portal's Limitations page):**
+- A track holding several flights gets one flight-list row naming the track's first and last airport; rings and block times at a middle stop are not on the row. Solving it means splitting such tracks, which changes flight identifiers.
+- Off-block times are limited by ground reception at the stand: good at 2 of the 100 busiest European airports, limited at 34.
+- Ground events are nearly absent at some large airports (Istanbul, Heathrow, Rome Fiumicino, Palma, Copenhagen); the cause is not established.
+- Ten of the 100 busiest European airports have no take-off or landing time on any of the three days (LGIR, LIRN, LICC, LATI, LTAC, LTBJ, GCTS, LEBB, LGKR, LUKK), and OPDI rarely or never names them as destination. This looks like a reference or airport-zone problem and should be investigated.
+- At ENBR, ENZV and ENVA the runway named never equals the airport record although the times agree (probably a difference in runway names); at Malta most take-off times and runways disagree.
+- A landing where reception ends in the flare, and a take-off first received more than 1,500 ft above the ground, get no time.
+
+**Open questions for the owner:**
+- Where the T00 to T25 milestone numbers come from: the A-CDM Implementation Manual (v5.0, 2017) numbers 1 to 16 and has no T codes; code comments call them "ICAO milestone numbers" and were left as they are.
+- Whether the runway-pass method derives from the traffic library's runway alignment (the pages say "comparable").
+- Whether US patent 11,935,419 B2 is the patent behind the holding thresholds.
+- Whether to remove `papers/milestone-plausibility-v1/data/examples.csv` (individual flights) from the portal.
+
+**Scratch of this work in the bucket** (all under `opdi-world/research/spot/`, about 13 GB; nothing else was written). It can be deleted once the figures are accepted; the tables on the portal cannot be rebuilt without re-processing the days:
+
+```bash
+mc rm --recursive --force osn/eurocontrol/opdi-world/research/spot/
+```
