@@ -336,3 +336,17 @@ Before the corrections, on 14 June: off-block 34.4% within 60 s, in-block 31.7%,
 ```bash
 mc rm --recursive --force osn/eurocontrol/opdi-world/research/spot/
 ```
+
+## Off-block, one row per flight, airport checks (added 2026-11-19)
+
+Code: `opdi` `industrialisation` at `e0d9c7b`; portal `feature/new-topics` at `8bad855` (on top of the owner's restructure of 2026-11-18). Measured on 10, 14 and 17 June 2026.
+
+- **Off-block time.** Only about 15% of departures in the airport records are received at the stand before they leave (about 38 of the 100 busiest European airports have almost no ground reception; where stands are received, 38% of departures are received before off-block against 73% of arrivals after in-block). The rule now takes the start of a slow push-back (`off_block_at_start_of_push_back`): within 60 s 40.3% → 48.6%, median 99 → 64 s. `info.first_seen_on` (`stand` 67.4% within 60 s, `apron` 63.1%, `taxiway` 9.6%) lets users leave out the unreliable times. 13 off-block times that were within 60 s of the record moved beyond it; accepted against the gain.
+- **One flight-list row per flight** (`flight_list_one_row_per_flight`, flight list v6.1.0, events_v0.5.0). A track with a landing and, at least 300 s later, a take-off is divided; flights are named `<track_id>-L<n>`; tracks and `track_id` are unchanged; working table `opdi_flight_legs`. About 0.5% of tracks (874 to 937 a day). To join flights to tracks, strip `-L<n>`. Circuits with full stops at one airport stay one row.
+- **Airports with no times** (LGIR, LIRN, LICC, LATI, LTAC, LTBJ, GCTS, LEBB, LGKR, LUKK, LDZA): the OpenSky archive holds no reports near the ground there. Not a pipeline error.
+- **Runway reference.** ENBR, ENZV and ENVA records hold a placeholder runway; Malta's records disagree with the tracks. The benchmark compares a record's runway only when it is a runway of that airport: runway equal 97.0% → 99.0% (take-off), 96.6% → 98.6% (landing). The fallback method's choice between parallel runways was corrected (Marseille).
+- **T04…T21** are labels of the PRU flight diagram with no official status; code comments and pages say so.
+
+**Open:** whether the plausibility checks should be described on the portal (their page was removed); the portal has still not been rendered here; nine pipeline tests fail as they did before these changes (seven need the portal's study files; two in `test_window_frames.py` not examined); `content/data/index.qmd` quotes row counts of an earlier build of 14 June.
+
+**Scratch in the bucket** (about 6.3 GB, all under `opdi-world/research/spot/`): `d0610n`, `d0617n`, `d0614c`, `runs/next_day`, `runs/next_1`. The command in the section above deletes it; afterwards the portal tables cannot be rebuilt without processing the days again.
