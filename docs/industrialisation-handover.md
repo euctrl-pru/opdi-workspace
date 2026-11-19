@@ -350,3 +350,10 @@ Code: `opdi` `industrialisation` at `e0d9c7b`; portal `feature/new-topics` at `8
 **Open:** whether the plausibility checks should be described on the portal (their page was removed); the portal has still not been rendered here; nine pipeline tests fail as they did before these changes (seven need the portal's study files; two in `test_window_frames.py` not examined); `content/data/index.qmd` quotes row counts of an earlier build of 14 June.
 
 **Scratch in the bucket** (about 6.3 GB, all under `opdi-world/research/spot/`): `d0610n`, `d0617n`, `d0614c`, `runs/next_day`, `runs/next_1`. The command in the section above deletes it; afterwards the portal tables cannot be rebuilt without processing the days again.
+
+## 2026-11-19 portal edits and a flight-list row for every track
+
+- opdi `f0d1894`, `d943b14`: `EventConfig.overflight_min_duration_s` (0 by default, 300 in `legacy()`) replaces the fixed 5-minute rule of the overflight pass. On 14 June 2026 this adds about 1,141 rows (tracks under 5 minutes, which carried 2,670 events with no flight row). v0.0.2 golden identical; default golden unchanged (its fixture has no short track).
+- Portal `c424c48`..`7c06173` on `feature/new-topics`: menu order and names (Data Access, OPDI Algorithms), Overview in the owner's wording, Data Access reduced to Trino and the daily files with one example, release names only on Releases and the Roadmap history.
+- Calls left to the owner: research papers under `papers/` keep their version names; the "Getting the old shapes" section stays on Releases; the home page counts and period still come from the v0.0.2 settings in `R/portal_config.R`; "about 160,000 flights" a day (now closer to 163,000).
+- Plan and spec: `docs/superpowers/plans/2026-11-19-portal-edits.md`, `docs/superpowers/specs/2026-11-19-portal-edits.md`.
