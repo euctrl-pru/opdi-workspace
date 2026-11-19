@@ -357,3 +357,12 @@ Code: `opdi` `industrialisation` at `e0d9c7b`; portal `feature/new-topics` at `8
 - Portal `c424c48`..`7c06173` on `feature/new-topics`: menu order and names (Data Access, OPDI Algorithms), Overview in the owner's wording, Data Access reduced to Trino and the daily files with one example, release names only on Releases and the Roadmap history.
 - Calls left to the owner: research papers under `papers/` keep their version names; the "Getting the old shapes" section stays on Releases; the home page counts and period still come from the v0.0.2 settings in `R/portal_config.R`; "about 160,000 flights" a day (now closer to 163,000).
 - Plan and spec: `docs/superpowers/plans/2026-11-19-portal-edits.md`, `docs/superpowers/specs/2026-11-19-portal-edits.md`.
+
+## 2026-11-19 smaller published day files
+
+- opdi `industrialisation` (`a84358d`, `d9d115c`): published `event_id` is `<flight_id>-E<nnnn>` (events with no flight-list row keep the working id), positions, distances, altitudes and bearings rounded (`opdi.output.schema.published_decimals`), Bloom filters sized to the content, zstd level 9. `EventConfig.published_event_id_by_flight` and `published_values_rounded` are off in `legacy()`.
+- Measured on 14 June 2026 (6,067,536 events): events file 414.4 MB -> 221.6 MB, flight list 15.8 -> 15.3 MB; writing the events file takes about 60 s longer with 12 executors.
+- Sample day for inspection: `s3a://eurocontrol/opdi-world/research/spot/sample_day/{flight_list,flight_events}/..._20260614.parquet`.
+- Portal `feature/new-topics` (`8b59651`): Data dictionary regenerated, identifier text and day sizes updated.
+- Day run time: about 1 h 45 min with 12 executors, of which steps 01, 02 and 02a (about 63 min) are scaled estimates; no full day has been timed end to end on the current code.
+- Bucket: 163.5 GB of 200 GB used on 19 Nov. `research/spot/runs/size_probe` (3.2 GB) is finished scratch; the owner decides on the October track tables (45 GB) and the symposium state vectors (80.7 GB).
