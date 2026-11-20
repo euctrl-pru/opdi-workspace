@@ -366,3 +366,12 @@ Code: `opdi` `industrialisation` at `e0d9c7b`; portal `feature/new-topics` at `8
 - Portal `feature/new-topics` (`8b59651`): Data dictionary regenerated, identifier text and day sizes updated.
 - Day run time: about 1 h 45 min with 12 executors, of which steps 01, 02 and 02a (about 63 min) are scaled estimates; no full day has been timed end to end on the current code.
 - Bucket: 163.5 GB of 200 GB used on 19 Nov. `research/spot/runs/size_probe` (3.2 GB) is finished scratch; the owner decides on the October track tables (45 GB) and the symposium state vectors (80.7 GB).
+
+## 2026-11-20 first worldwide day from an empty bucket, with ADS-C
+
+- The owner had the bucket cleared (only `opdi/osn_symposium_paper_2026/`, two small CSV folders at the root and `opdi-world/research/{benchmarker_published,spot/sample_day}` remain) and asked for one worldwide day with ADS-C. It ran end to end on 20 Nov into `s3a://eurocontrol/opdi/v2.0.0/` (14 June 2026: 163,831 flights, 6,067,193 events; `published/` holds the two day files, the index and the catalogue). Script: `/home/jupyter/work/run_opdi_day_adsc.sh`.
+- PR #28 is merged. The commits since are on `industrialisation` as PR https://github.com/euctrl-pru/OPDI/pull/29 (not merged): smaller published files, `--adsc` / `OPDI_ADSC`, OurAirports mirror, step 00 executor memory (6g + 7680m), retry with a fresh Java process, 00b/00f written in batches through a building table (`opdi.reference.staged.StagedTable`), 00c overlap report on compact cells and polygons round a pole, readme "Run time and resources".
+- Faults found by building the reference tables worldwide from nothing, each fixed at its cause: ourairports.com certificate expired; executors killed in 00a (Python workers 4 GiB + 11g heap); driver killed in 00b (all layouts held in memory, and a local progress log that named airports never written); driver killed in 00c (overlap report filled 108 million cells); Antarctica not fillable by h3.
+- Measured times: step 00 about 2 h 30 min once per warehouse; the day 5,961 s (01 1,182 with three days of reports, 02 1,572, 02a 789, 03 469, 04 1,571, 04b 122, 09 256). One `NoSuchUpload` in 02a, retried by the command.
+- Storage behaviour seen again: single small writes not answered for 7 to 24 minutes, and `NoSuchUpload` at the end of a write. Both are handled (request timeout and retries, step retry) but cost time.
+- The pod has 16 GiB and holds the driver; three copies of the run script at once exhausted it. The script takes a lock.
